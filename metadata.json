@@ -1,9 +1,9 @@
 {
-  "name": "puzzle_maker",
+  "name": "mental_maze_puzzler",
   "version": "0.0.1",
-  "description": "Generates quiz based on a topic",
+  "description": "Generates a puzzle based on the thread or tweet it was tagged on.",
   "category": "agent",
-  "tags": [],
+  "tags": ["twitter", "x", "puzzle", "game"],
   "details": {
     "agent": {
       "defaults": {
@@ -11,6 +11,11 @@
         "model_provider": "fireworks",
         "model_temperature": 1.0,
         "model_max_tokens": 16384
+      }
+    },
+    "triggers": {
+      "events": {
+        "x_mentions": ["@0xarize"]
       }
     }
   },

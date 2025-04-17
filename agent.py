@@ -4,161 +4,200 @@ import json
 import os
 from datetime import datetime, timezone
 import time
+import traceback
+from typing import Optional, Dict, Any
+import uuid
 
-class TwitterMonitor:
+
+class MentalMazeAgent:
     def __init__(self, env: Environment):
         self.env = env
-        self.api = self._setup_twitter_api()
+        self.api_client = self._setup_twitter_api()
         self.last_check_time = datetime.now(timezone.utc)
 
-    def _setup_twitter_api(self):
-        # Get credentials from environment variables
-        bearer_token = os.getenv("TWITTER_BEARER_TOKEN")
-        if not bearer_token:
-            self.env.add_agent_log("Error: Twitter bearer token not found in environment variables", level=3)
-            return None
-        return tweepy.Client(bearer_token=bearer_token)
-
-    def check_mentions(self):
-        if not self.api:
-            return None
-        
+    def _setup_twitter_api(self) -> Optional[tweepy.Client]:
+        """Initialize Twitter API client with credentials"""
         try:
-            # Get the bot's user ID (should be stored in config)
-            bot_username = os.getenv("TWITTER_BOT_USERNAME", "MentalMazeBot")
-            bot_user = self.api.get_user(username=bot_username)
-            
-            # Search for mentions since last check
-            mentions = self.api.get_mentions(
-                bot_user.data.id,
-                since_id=self.last_check_time.strftime('%Y%m%d%H%M'),
-                tweet_fields=['created_at', 'text', 'author_id']
+            # Get credentials from environment variables
+            credentials = {
+                "consumer_key": self.env.env_vars.get("X_CONSUMER_KEY"),
+                "consumer_secret": self.env.env_vars.get("X_CONSUMER_SECRET"),
+                "access_token": self.env.env_vars.get("X_ACCESS_TOKEN"),
+                "access_token_secret": self.env.env_vars.get("X_ACCESS_TOKEN_SECRET"),
+            }
+
+            # Validate credentials
+            missing = [k for k, v in credentials.items() if not v]
+            if missing:
+                self.env.add_agent_log(
+                    f"Missing Twitter credentials: {', '.join(missing)}", level=3
+                )
+                return None
+
+            return tweepy.Client(**credentials)
+
+        except Exception as e:
+            self.env.add_agent_log(f"Twitter API setup failed: {str(e)}", level=3)
+            return None
+
+    def process_mention(self, mention: Dict[str, Any]) -> None:
+        """Process a single Twitter mention"""
+        try:
+            # Generate unique game ID
+            game_id = str(uuid.uuid4())[:8]
+            mention_key = f"mention-{mention.id}-game-{game_id}"
+
+            # Check if already processed
+            existing = self.env.get_agent_data_by_key(mention_key)
+            if existing:
+                status = existing.get("value", {}).get("status")
+                if status == "complete":
+                    self.env.add_agent_log(
+                        f"Mention {mention.id} already processed", level=1
+                    )
+                    return
+                elif status == "error":
+                    self.env.add_agent_log(
+                        f"Mention {mention.id} previously errored", level=2
+                    )
+                    return
+
+            # Mark as processing
+            self.env.save_agent_data(mention_key, {"status": "processing"})
+
+            # Parse mention parameters
+            params = self._parse_mention_params(mention)
+            if not params:
+                raise ValueError("Failed to parse mention parameters")
+
+            # Generate quiz from mention content
+            quiz_data = self._generate_quiz(params)
+
+            # Deploy to blockchain
+            tx_hash = self._deploy_to_blockchain(quiz_data, game_id)
+
+            # Generate response
+            game_url = f"www.mentalmaze.com/game/{game_id}"
+            response = self._create_response(game_url, tx_hash)
+
+            # Reply to tweet
+            self._reply_to_tweet(mention.id, response)
+
+            # Mark as complete
+            self.env.save_agent_data(
+                mention_key,
+                {"status": "complete", "game_id": game_id, "tx_hash": tx_hash},
             )
-            
+
+        except Exception as e:
+            self.env.add_agent_log(
+                f"Error processing mention {mention.id}: {str(e)}", level=3
+            )
+            self.env.save_agent_data(mention_key, {"status": "error", "error": str(e)})
+
+    def _parse_mention_params(self, mention: Dict[str, Any]) -> Dict[str, Any]:
+        """Parse mention text for quiz parameters"""
+        text = mention.text.lower()
+        return {
+            "source_tweet_url": f"https://twitter.com/user/status/{mention.id}",
+            "num_questions": self._extract_param(text, "questions:", 1),
+            "reward_scheme": self._extract_param(text, "reward:", "equal"),
+            "gatepass_amount": self._extract_param(text, "gatepass:", 1.0),
+            "game_duration": self._extract_param(text, "duration:", 3600),
+        }
+
+    def _extract_param(self, text: str, prefix: str, default: Any) -> Any:
+        """Helper to extract parameters from tweet text"""
+        try:
+            if prefix in text:
+                value = text.split(prefix)[1].split()[0]
+                if isinstance(default, int):
+                    return int(value)
+                elif isinstance(default, float):
+                    return float(value)
+                return value
+        except:
+            pass
+        return default
+
+    def _generate_quiz(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate quiz based on parameters"""
+        prompt = {
+            "role": "system",
+            "content": f"""Generate a quiz based on the following tweet at {params['source_tweet_url']}.
+            Create {params['num_questions']} multiple choice questions.
+            The quiz should run for {params['game_duration']} seconds.
+            The reward distribution should be {params['reward_scheme']}.
+            Entry fee is {params['gatepass_amount']} tokens.
+
+            Return the quiz in JSON format with:
+            - questions: array of questions with text and 4 choices
+            - correct_answers: array of correct answer indices
+            - metadata: containing reward_scheme, duration, and entry_fee""",
+            "parameters": params,
+        }
+        result = self.env.completion([prompt] + self.env.list_messages())
+        return json.loads(result) if isinstance(result, str) else result
+
+    def _deploy_to_blockchain(self, quiz_data: Dict[str, Any], game_id: str) -> str:
+        """Deploy quiz to NEAR blockchain"""
+        # TODO: Implement blockchain deployment
+        return f"mock_tx_hash_{game_id}"
+
+    def _create_response(self, game_url: str, tx_hash: str) -> str:
+        """Create Twitter response message"""
+        return (
+            f"🎮 Your quiz is ready! Play now at {game_url}\n\nTransaction: {tx_hash}"
+        )
+
+    def _reply_to_tweet(self, tweet_id: int, message: str) -> None:
+        """Reply to the original tweet"""
+        if self.api_client:
+            try:
+                self.api_client.create_tweet(
+                    text=message, in_reply_to_tweet_id=tweet_id
+                )
+            except Exception as e:
+                self.env.add_agent_log(f"Failed to reply to tweet: {str(e)}", level=3)
+
+    def monitor_mentions(self) -> None:
+        """Main monitoring loop"""
+        if not self.api_client:
+            self.env.add_agent_log("Twitter API client not initialized", level=3)
+            return
+
+        try:
+            # Get bot's user info
+            bot_username = self.env.env_vars.get(
+                "TWITTER_BOT_USERNAME", "MentalMazeBot"
+            )
+            bot_user = self.api_client.get_user(username=bot_username)
+
+            # Get mentions since last check
+            mentions = self.api_client.get_mentions(
+                bot_user.data.id,
+                since_id=self.last_check_time.strftime("%Y%m%d%H%M"),
+                tweet_fields=["created_at", "text", "author_id"],
+            )
+
             self.last_check_time = datetime.now(timezone.utc)
-            return mentions.data if mentions.data else []
-            
+
+            if mentions.data:
+                for mention in mentions.data:
+                    self.process_mention(mention)
+
         except Exception as e:
             self.env.add_agent_log(f"Error checking mentions: {str(e)}", level=3)
-            return None
-
-    def parse_tweet_content(self, tweet):
-        """Parse tweet content for quiz parameters"""
-        try:
-            text = tweet.text.lower()
-            params = {
-                'source_tweet_url': f"https://twitter.com/user/status/{tweet.id}",
-                'num_questions': 1,  # default
-                'reward_scheme': 'equal',  # default
-                'gatepass_amount': 1,  # default NEAR tokens
-                'game_duration': 3600  # default 1 hour in seconds
-            }
-            
-            # Extract parameters from tweet text
-            if 'questions:' in text:
-                num = text.split('questions:')[1].split()[0]
-                if num.isdigit():
-                    params['num_questions'] = int(num)
-            
-            if 'reward:' in text:
-                reward = text.split('reward:')[1].split()[0]
-                if reward in ['equal', 'proportional', 'winner-takes-all']:
-                    params['reward_scheme'] = reward
-            
-            if 'gatepass:' in text:
-                amount = text.split('gatepass:')[1].split()[0]
-                if amount.replace('.', '').isdigit():
-                    params['gatepass_amount'] = float(amount)
-            
-            if 'duration:' in text:
-                duration = text.split('duration:')[1].split()[0]
-                if duration.isdigit():
-                    params['game_duration'] = int(duration) * 3600  # Convert hours to seconds
-            
-            return params
-            
-        except Exception as e:
-            self.env.add_agent_log(f"Error parsing tweet content: {str(e)}", level=3)
-            return None
-
-AI_PROMPT = """
-You are an AI agent designed to create and manage quiz games on the NEAR blockchain platform MentalMaze. Follow these instructions to generate engaging and interactive quizzes:
-
-## Instructions for the LLM:
-
-1. **Quiz Generation from Social Content**:
-   - Monitor X (Twitter) for mentions.
-   - Parse tweet/thread content for quiz material.
-   - Generate the specified number of questions (default to 1 if not specified).
-
-2. **Game Configuration Processing**:
-   - Parse reward distribution parameters.
-   - Validate gatepass amount.
-   - Set game duration.
-   - Handle game metadata.
-
-3. **Blockchain Integration**:
-   - Deploy the quiz contract to the NEAR chain.
-   - Store game data in the database via API.
-   - Generate a unique game identifier.
-
-4. **Response Generation**:
-   - Create a game URL in the format: www.mentalmaze/game/:randomid.
-   - Return the playable game link to the user.
-
-5. **Error Handling**:
-   - Handle invalid input parameters.
-   - Manage failed blockchain transactions.
-   - Address API connectivity issues.
-   - Resolve content parsing errors.
-
-6. **Security Considerations**:
-   - Validate all input parameters.
-   - Ensure secure blockchain transactions.
-   - Protect against malicious content.
-
-## Expected Output:
-- Confirmation of game creation.
-- Unique game URL.
-- Transaction hash (optional).
-
-Make the output easy to integrate into frontend apps or chatbots. Ensure the quiz feels like a mini-game and optionally add a theme (e.g., "🧠 Quiz Quest: Space Edition!")."""
 
 
 def run(env: Environment):
-    # Initialize Twitter monitor
-    twitter_monitor = TwitterMonitor(env)
-    
+    agent = MentalMazeAgent(env)
+
     while True:
-        # Check for new mentions
-        mentions = twitter_monitor.check_mentions()
-        
-        if mentions:
-            for mention in mentions:
-                # Parse tweet content for game parameters
-                params = twitter_monitor.parse_tweet_content(mention)
-                
-                if params:
-                    prompt = {
-                        "role": "system",
-                        "content": AI_PROMPT,
-                        "parameters": params
-                    }
-                    
-                    # Generate quiz based on tweet content
-                    result = env.completion([prompt] + env.list_messages())
-                    
-                    # Add the result to conversation history
-                    env.add_reply(result)
-                    
-                    # Log successful quiz generation
-                    env.add_agent_log(f"Generated quiz for tweet {params['source_tweet_url']}", level=1)
-                else:
-                    env.add_agent_log(f"Failed to parse tweet content", level=2)
-        
-        # Wait for 60 seconds before next check
-        time.sleep(60)
-        
+        agent.monitor_mentions()
+        time.sleep(60)  # Check every minute
+
     env.request_user_input()
 
-run(env)
+
+# run(env)
