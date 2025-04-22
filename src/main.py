@@ -1,3 +1,8 @@
+# Add src directory to sys.path for module resolution
+import sys, os
+
+sys.path.append(os.path.dirname(__file__))
+
 # Application entrypoint
 from utils.config import Config
 from bot.telegram_bot import TelegramBot
