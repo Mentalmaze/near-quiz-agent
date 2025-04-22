@@ -4,6 +4,7 @@ import datetime
 
 Base = declarative_base()
 
+
 class User(Base):
     __tablename__ = "users"
     id = Column(String, primary_key=True)  # Telegram user ID as string

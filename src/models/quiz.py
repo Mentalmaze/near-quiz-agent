@@ -5,11 +5,13 @@ import uuid
 
 Base = declarative_base()
 
+
 class QuizStatus(enum.Enum):
     DRAFT = "DRAFT"
     FUNDING = "FUNDING"
     ACTIVE = "ACTIVE"
     CLOSED = "CLOSED"
+
 
 class Quiz(Base):
     __tablename__ = "quizzes"
