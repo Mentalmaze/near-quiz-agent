@@ -1,0 +1,7 @@
+# Application dependencies
+python-telegram-bot>=20.0
+python-dotenv
+langchain-core
+langchain-google-genai
+sqlalchemy
+near-api-py
