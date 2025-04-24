@@ -225,25 +225,43 @@ async def handle_reward_structure(update: Update, context: ContextTypes.DEFAULT_
     # Generate deposit address (dummy for now)
     deposit_addr = f"quiz-{uuid.uuid4()}.near"
 
+    # We'll save these for the group announcement
+    quiz_topic = None
+    original_group_chat_id = None
+
     # Update quiz in DB: find latest ACTIVE quiz by this user with no reward_schedule
     session = SessionLocal()
-    quiz = (
-        session.query(Quiz)
-        .filter(Quiz.status == QuizStatus.ACTIVE)
-        .order_by(Quiz.last_updated.desc())
-        .first()
-    )
+    try:
+        quiz = (
+            session.query(Quiz)
+            .filter(Quiz.status == QuizStatus.ACTIVE)
+            .order_by(Quiz.last_updated.desc())
+            .first()
+        )
 
-    if not quiz:
-        await update.message.reply_text("No active quiz found to attach rewards to.")
-        session.close()
+        if not quiz:
+            await update.message.reply_text(
+                "No active quiz found to attach rewards to."
+            )
+            return
+
+        quiz.reward_schedule = schedule
+        quiz.deposit_address = deposit_addr
+        quiz.status = QuizStatus.FUNDING
+
+        # Store these values for use after session is closed
+        quiz_topic = quiz.topic
+        original_group_chat_id = quiz.group_chat_id
+
+        session.commit()
+    except Exception as e:
+        await update.message.reply_text(f"Error saving reward structure: {str(e)}")
+        import traceback
+
+        traceback.print_exc()
         return
-
-    quiz.reward_schedule = schedule
-    quiz.deposit_address = deposit_addr
-    quiz.status = QuizStatus.FUNDING
-    session.commit()
-    session.close()
+    finally:
+        session.close()
 
     # Inform creator privately
     await update.message.reply_text(
@@ -252,14 +270,21 @@ async def handle_reward_structure(update: Update, context: ContextTypes.DEFAULT_
 
     # Announce in group chat
     try:
-        if quiz.group_chat_id:
-            await context.bot.send_message(
-                chat_id=quiz.group_chat_id,
-                text=(
-                    f"Quiz '{quiz.topic}' is now funding.\n"
-                    f"Creator must deposit {total} Near to activate it.\n"
-                    f"Once active, type /playquiz to join!"
-                ),
-            )
+        if original_group_chat_id:
+            # Use a longer timeout for the announcement
+            async with asyncio.timeout(10):  # 10 second timeout
+                await context.bot.send_message(
+                    chat_id=original_group_chat_id,
+                    text=(
+                        f"Quiz '{quiz_topic}' is now funding.\n"
+                        f"Creator must deposit {total} Near to activate it.\n"
+                        f"Once active, type /playquiz to join!"
+                    ),
+                )
+    except asyncio.TimeoutError:
+        print(f"Failed to announce to group: Timeout error")
     except Exception as e:
         print(f"Failed to announce to group: {e}")
+        import traceback
+
+        traceback.print_exc()

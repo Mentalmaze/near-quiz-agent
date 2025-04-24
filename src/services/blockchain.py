@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from models.quiz import Quiz, QuizStatus
 from store.database import SessionLocal
 from utils.config import Config
+import traceback
 
 
 class BlockchainMonitor:
@@ -46,71 +47,90 @@ class BlockchainMonitor:
             try:
                 # Check for quizzes in FUNDING status
                 session = SessionLocal()
-                funding_quizzes = (
-                    session.query(Quiz)
-                    .filter(
-                        Quiz.status == QuizStatus.FUNDING, Quiz.deposit_address != None
+                try:
+                    funding_quizzes = (
+                        session.query(Quiz)
+                        .filter(
+                            Quiz.status == QuizStatus.FUNDING,
+                            Quiz.deposit_address != None,
+                        )
+                        .all()
                     )
-                    .all()
-                )
 
-                for quiz in funding_quizzes:
-                    # Simulate deposit check
-                    await self._check_deposit(quiz)
+                    # Important: Load all necessary attributes while session is active
+                    # and create a list of quiz IDs to process
+                    quiz_ids_to_process = []
+                    for quiz in funding_quizzes:
+                        quiz_ids_to_process.append(quiz.id)
+                finally:
+                    session.close()
 
-                session.close()
+                # Process each quiz with its own session
+                for quiz_id in quiz_ids_to_process:
+                    await self._check_deposit(quiz_id)
 
                 # Check every 30 seconds (would be longer in production)
                 await asyncio.sleep(30)
             except Exception as e:
                 print(f"Error in blockchain monitor: {e}")
+                traceback.print_exc()
                 await asyncio.sleep(30)
 
-    async def _check_deposit(self, quiz):
+    async def _check_deposit(self, quiz_id):
         """
         Simulate checking for deposits to a quiz address.
 
         In a real implementation, this would query the NEAR RPC for transactions
         to the deposit address and verify sufficient funds were received.
         """
-        # For demo purposes, we'll just randomly "detect" a deposit after quiz creation
-        # For simplicity, we'll say quizzes get "funded" after they've been in FUNDING state
-        # for at least 1 minute
+        # Open a new session for this operation
         session = SessionLocal()
         try:
             # Reload the quiz to get current state
-            quiz = session.query(Quiz).filter(Quiz.id == quiz.id).first()
+            quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
             if not quiz or quiz.status != QuizStatus.FUNDING:
-                session.close()
                 return
 
             # Check if quiz has been in FUNDING status for more than 1 minute
             # In a real implementation, we would check the blockchain for actual deposits
             if datetime.utcnow() - quiz.last_updated > timedelta(minutes=1):
-                # Update quiz to ACTIVE
+                # Update quiz to ACTIVE and commit immediately
                 quiz.status = QuizStatus.ACTIVE
                 total_reward = (
-                    sum(quiz.reward_schedule.values()) if quiz.reward_schedule else 0
+                    sum(int(value) for value in quiz.reward_schedule.values())
+                    if quiz.reward_schedule
+                    else 0
                 )
+                group_chat_id = quiz.group_chat_id
+                topic = quiz.topic
+
                 session.commit()
+                session.close()
+                session = None  # Prevent further usage
 
                 # Announce the quiz is active in the original group chat
                 try:
-                    # In production, we would store the original chat_id with the quiz
-                    # For the demo we'll use a fallback approach
-                    if hasattr(quiz, "group_chat_id") and quiz.group_chat_id:
-                        await self.bot.send_message(
-                            chat_id=quiz.group_chat_id,
-                            text=f"📣 New quiz '{quiz.topic}' is now active! 🎯\n"
-                            f"Total rewards: {total_reward} NEAR\n"
-                            f"Type /playquiz {quiz.id} to participate!",
-                        )
+                    if group_chat_id:
+                        # Use longer timeout for the announcement
+                        async with asyncio.timeout(10):  # 10 second timeout
+                            await self.bot.send_message(
+                                chat_id=group_chat_id,
+                                text=f"📣 New quiz '{topic}' is now active! 🎯\n"
+                                f"Total rewards: {total_reward} NEAR\n"
+                                f"Type /playquiz to participate!",
+                            )
+                except asyncio.TimeoutError:
+                    print(f"Failed to announce active quiz: Timed out")
                 except Exception as e:
                     print(f"Failed to announce active quiz: {e}")
+                    traceback.print_exc()
         except Exception as e:
             print(f"Error checking deposit: {e}")
+            traceback.print_exc()
         finally:
-            session.close()
+            # Always ensure session is closed
+            if session is not None:
+                session.close()
 
 
 # To be called during bot initialization
