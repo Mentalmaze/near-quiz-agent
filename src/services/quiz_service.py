@@ -65,19 +65,80 @@ def parse_questions(raw_questions):
     lines = raw_questions.strip().split("\n")
     result = {"question": "", "options": {}, "correct": ""}
 
+    # More flexible parsing that can handle different formats
+    question_pattern = re.compile(r"^(?:Question:?\s*)?(.+)$")
+    option_pattern = re.compile(r"^([A-D])[):\.]?\s+(.+)$")
+    correct_pattern = re.compile(
+        r"^(?:Correct\s+Answer:?\s*|Answer:?\s*)([A-D])\.?$", re.IGNORECASE
+    )
+
+    # First pass - try to identify the question
+    for i, line in enumerate(lines):
+        if "Question" in line or (
+            i == 0
+            and not any(x in line.lower() for x in ["a)", "b)", "c)", "d)", "correct"])
+        ):
+            match = question_pattern.match(line)
+            if match:
+                question_text = match.group(1).strip()
+                if "Question:" in line:
+                    question_text = line[line.find("Question:") + 9 :].strip()
+                result["question"] = question_text
+                break
+
+    # If still no question found, use the first line
+    if not result["question"] and lines:
+        result["question"] = lines[0].strip()
+
+    # Second pass - extract options and correct answer
     for line in lines:
-        if line.startswith("Question:"):
-            result["question"] = line[len("Question:") :].strip()
-        elif line.startswith("A)"):
-            result["options"]["A"] = line[len("A)") :].strip()
-        elif line.startswith("B)"):
-            result["options"]["B"] = line[len("B)") :].strip()
-        elif line.startswith("C)"):
-            result["options"]["C"] = line[len("C)") :].strip()
-        elif line.startswith("D)"):
-            result["options"]["D"] = line[len("D)") :].strip()
-        elif line.startswith("Correct Answer:"):
-            result["correct"] = line[len("Correct Answer:") :].strip()
+        line = line.strip()
+
+        # Try to match options with various formats
+        option_match = option_pattern.match(line)
+        if option_match:
+            letter, text = option_match.groups()
+            result["options"][letter] = text.strip()
+            continue
+
+        # Check for options in format "A. Option text" or "A: Option text"
+        for prefix in (
+            [f"{letter})" for letter in "ABCD"]
+            + [f"{letter}." for letter in "ABCD"]
+            + [f"{letter}:" for letter in "ABCD"]
+        ):
+            if line.startswith(prefix):
+                letter = prefix[0]
+                text = line[len(prefix) :].strip()
+                result["options"][letter] = text
+                break
+
+        # Check for correct answer in various formats
+        correct_match = correct_pattern.match(line)
+        if correct_match or "Correct Answer" in line or "Answer:" in line:
+            if correct_match:
+                result["correct"] = correct_match.group(1).strip()
+            else:
+                # Extract just the letter from lines like "Correct Answer: A"
+                answer_parts = line.split(":")
+                if len(answer_parts) > 1:
+                    possible_letter = answer_parts[-1].strip()
+                    if possible_letter in "ABCD":
+                        result["correct"] = possible_letter
+
+    print(f"Parsed question structure: {result}")
+
+    # If we don't have options or they're incomplete, create fallback options
+    if not result["options"] or len(result["options"]) < 4:
+        print("Warning: Missing options in quiz question. Using fallback options.")
+        for letter in "ABCD":
+            if letter not in result["options"]:
+                result["options"][letter] = f"Option {letter}"
+
+    # If we don't have a correct answer, default to A
+    if not result["correct"]:
+        print("Warning: Missing correct answer in quiz question. Defaulting to A.")
+        result["correct"] = "A"
 
     return result
 
