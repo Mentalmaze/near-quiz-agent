@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -6,14 +8,21 @@ from telegram.ext import (
     ContextTypes,
 )
 from telegram.ext import MessageHandler, filters
+from telegram.error import TimedOut, NetworkError, RetryAfter, TelegramError, BadRequest
 from services.blockchain import start_blockchain_monitor
 import httpx
-import asyncio
+import traceback
+
+# Configure logging
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
 
 class TelegramBot:
     def __init__(self, token: str):
-        # Build the Telegram application with increased connection timeout
+        # Build the Telegram application with increased connection timeout and retry settings
         self.app = (
             ApplicationBuilder()
             .token(token)
@@ -23,14 +32,47 @@ class TelegramBot:
             .read_timeout(30.0)
             .write_timeout(30.0)
             .pool_timeout(30.0)
+            .connection_pool_size(8)  # Increase connection pool size
             .build()
         )
         self.blockchain_monitor = None
 
     @staticmethod
-    def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Log Errors caused by Updates."""
-        print(f"Update {update} caused error {context.error}")
+    async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle errors raised during callback execution."""
+        # Extract the error from context
+        error = context.error
+
+        try:
+            if update:
+                # If we have an update object, we can respond to the user
+                if isinstance(error, TimedOut):
+                    logger.warning(f"Timeout error when processing update {update}")
+                    # Don't try to respond on timeout errors, it might cause another timeout
+                    return
+
+                if isinstance(error, NetworkError):
+                    logger.error(
+                        f"Network error when processing update {update}: {error}"
+                    )
+                    # Don't try to respond on network errors, it might cause another error
+                    return
+
+                if isinstance(error, TelegramError):
+                    logger.error(
+                        f"Telegram API error when processing update {update}: {error}"
+                    )
+            else:
+                # We don't have an update object
+                logger.error(f"Error without update object: {error}")
+
+            # Log the full traceback for any error
+            logger.error(f"Exception while handling an update:", exc_info=context.error)
+
+        except Exception as e:
+            # If error handling itself fails, log it but don't crash
+            logger.error(f"Error in error handler: {e}")
+            logger.error(traceback.format_exc())
 
     def register_handlers(self):
         # Import handlers here to avoid circular dependencies
@@ -69,23 +111,31 @@ class TelegramBot:
 
     async def start(self):
         """Start polling for updates and initialize services."""
-        print("Initializing blockchain monitor...")
+        logger.info("Initializing blockchain monitor...")
         await self.init_blockchain()
 
-        print("Starting Telegram bot...")
+        logger.info("Starting Telegram bot...")
         await self.app.initialize()
         await self.app.start()
-        await self.app.updater.start_polling(drop_pending_updates=True)
-        print("Bot is running!")
+        await self.app.updater.start_polling(
+            drop_pending_updates=True,
+            allowed_updates=[
+                "message",
+                "callback_query",
+            ],  # Only process specific updates
+            read_timeout=30,  # Increase read timeout
+            timeout=30,  # Increase timeout
+        )
+        logger.info("Bot is running!")
 
         # Keep the application running with a simple infinite loop
-        # This replaces the problematic wait_until_stopped() call
         try:
             # Create a never-ending task
             stop_signal = asyncio.Future()
             await stop_signal
         except asyncio.CancelledError:
             # Handle graceful shutdown
+            logger.info("Shutting down...")
             pass
         finally:
             # Ensure proper cleanup when the bot is stopped
@@ -93,4 +143,4 @@ class TelegramBot:
                 try:
                     await self.blockchain_monitor.stop_monitoring()
                 except Exception as e:
-                    print(f"Error stopping blockchain monitor: {e}")
+                    logger.error(f"Error stopping blockchain monitor: {e}")

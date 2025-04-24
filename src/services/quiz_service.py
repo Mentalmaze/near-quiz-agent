@@ -4,22 +4,30 @@ from models.quiz import Quiz, QuizStatus, QuizAnswer
 from store.database import SessionLocal
 from agent import generate_quiz
 from services.user_service import check_wallet_linked
+from utils.telegram_helpers import safe_send_message, safe_edit_message_text
 import re
 import uuid
 import json
 import asyncio
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 async def create_quiz(update: Update, context: CallbackContext):
     # Require a topic as argument
     if not context.args:
-        await update.message.reply_text("Usage: /createquiz <topic>")
+        await safe_send_message(
+            context.bot, update.effective_chat.id, "Usage: /createquiz <topic>"
+        )
         return
     topic = " ".join(context.args)
 
     try:
         # Inform user
-        await update.message.reply_text(f"Generating quiz for topic: {topic}")
+        await safe_send_message(
+            context.bot, update.effective_chat.id, f"Generating quiz for topic: {topic}"
+        )
         # Store group chat for later announcements
         group_chat_id = update.effective_chat.id
 
@@ -43,21 +51,29 @@ async def create_quiz(update: Update, context: CallbackContext):
         session.close()
 
         # Notify group and DM creator for contract setup
-        await update.message.reply_text(
-            f"Quiz created with ID: {quiz_id}! Check your DMs to set up the reward contract."
+        await safe_send_message(
+            context.bot,
+            update.effective_chat.id,
+            f"Quiz created with ID: {quiz_id}! Check your DMs to set up the reward contract.",
         )
 
         # DM the creator for reward structure details
-        await context.bot.send_message(
-            chat_id=update.effective_user.id,
-            text="Please specify the reward structure in this private chat (e.g., '2 Near for 1st, 1 Near for 2nd').",
+        await safe_send_message(
+            context.bot,
+            update.effective_user.id,
+            "Please specify the reward structure in this private chat (e.g., '2 Near for 1st, 1 Near for 2nd').",
         )
     except asyncio.TimeoutError:
-        await update.message.reply_text(
-            "Sorry, quiz generation timed out. Please try again with a simpler topic."
+        await safe_send_message(
+            context.bot,
+            update.effective_chat.id,
+            "Sorry, quiz generation timed out. Please try again with a simpler topic.",
         )
     except Exception as e:
-        await update.message.reply_text(f"Error creating quiz: {str(e)}")
+        logger.error(f"Error creating quiz: {e}", exc_info=True)
+        await safe_send_message(
+            context.bot, update.effective_chat.id, f"Error creating quiz: {str(e)}"
+        )
 
 
 def parse_questions(raw_questions):
@@ -148,8 +164,10 @@ async def play_quiz(update: Update, context: CallbackContext):
 
     # Check if user has linked wallet
     if not await check_wallet_linked(user_id):
-        await update.message.reply_text(
-            "You need to link your wallet first! Use /linkwallet in a private chat with me."
+        await safe_send_message(
+            context.bot,
+            update.effective_chat.id,
+            "You need to link your wallet first! Use /linkwallet in a private chat with me.",
         )
         return
 
@@ -165,7 +183,11 @@ async def play_quiz(update: Update, context: CallbackContext):
         )
 
         if not latest_quiz:
-            await update.message.reply_text("No active quizzes found! Try again later.")
+            await safe_send_message(
+                context.bot,
+                update.effective_chat.id,
+                "No active quizzes found! Try again later.",
+            )
             session.close()
             return
 
@@ -180,13 +202,17 @@ async def play_quiz(update: Update, context: CallbackContext):
     session.close()
 
     if not quiz:
-        await update.message.reply_text(f"No quiz found with ID {quiz_id}")
+        await safe_send_message(
+            context.bot, update.effective_chat.id, f"No quiz found with ID {quiz_id}"
+        )
         return
 
     # Tell user we'll DM them
     if update.effective_chat.type != "private":
-        await update.message.reply_text(
-            f"@{update.effective_user.username}, I'll send you the quiz questions in a private message!"
+        await safe_send_message(
+            context.bot,
+            update.effective_chat.id,
+            f"@{update.effective_user.username}, I'll send you the quiz questions in a private message!",
         )
 
     # Create inline keyboard for answering
@@ -206,8 +232,9 @@ async def play_quiz(update: Update, context: CallbackContext):
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     # Send question with inline keyboard
-    await context.bot.send_message(
-        chat_id=update.effective_user.id,
+    await safe_send_message(
+        context.bot,
+        update.effective_user.id,
         text=f"Quiz: {quiz.topic}\n\n{question}",
         reply_markup=reply_markup,
     )
@@ -222,7 +249,12 @@ async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
     try:
         _, quiz_id, answer = query.data.split(":")
     except ValueError:
-        await query.edit_message_text("Invalid answer format.")
+        await safe_edit_message_text(
+            context.bot,
+            query.message.chat_id,
+            query.message.message_id,
+            "Invalid answer format.",
+        )
         return
 
     # Get quiz from database
@@ -231,7 +263,12 @@ async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
         quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
 
         if not quiz:
-            await query.edit_message_text("Quiz not found.")
+            await safe_edit_message_text(
+                context.bot,
+                query.message.chat_id,
+                query.message.message_id,
+                "Quiz not found.",
+            )
             return
 
         # Get correct answer
@@ -253,14 +290,17 @@ async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
         session.commit()
 
         # Update message to show result
-        await query.edit_message_text(
+        await safe_edit_message_text(
+            context.bot,
+            query.message.chat_id,
+            query.message.message_id,
             f"{query.message.text}\n\n"
             f"Your answer: {answer}\n"
             f"{'✅ Correct!' if is_correct else f'❌ Wrong. The correct answer is {correct_answer}.'}",
             reply_markup=None,
         )
     except Exception as e:
-        print(f"Error handling quiz answer: {e}")
+        logger.error(f"Error handling quiz answer: {e}", exc_info=True)
         import traceback
 
         traceback.print_exc()
@@ -291,8 +331,10 @@ async def handle_reward_structure(update: Update, context: ContextTypes.DEFAULT_
     # Parse amounts from text, e.g. '2 Near for 1st, 1 Near for 2nd'
     amounts = re.findall(r"(\d+)\s*Near", text, re.IGNORECASE)
     if not amounts:
-        await update.message.reply_text(
-            "Couldn't parse reward amounts. Please specify like '2 Near for 1st, 1 Near for 2nd'."
+        await safe_send_message(
+            context.bot,
+            update.effective_chat.id,
+            "Couldn't parse reward amounts. Please specify like '2 Near for 1st, 1 Near for 2nd'.",
         )
         return
 
@@ -318,8 +360,10 @@ async def handle_reward_structure(update: Update, context: ContextTypes.DEFAULT_
         )
 
         if not quiz:
-            await update.message.reply_text(
-                "No active quiz found to attach rewards to."
+            await safe_send_message(
+                context.bot,
+                update.effective_chat.id,
+                "No active quiz found to attach rewards to.",
             )
             return
 
@@ -333,7 +377,12 @@ async def handle_reward_structure(update: Update, context: ContextTypes.DEFAULT_
 
         session.commit()
     except Exception as e:
-        await update.message.reply_text(f"Error saving reward structure: {str(e)}")
+        await safe_send_message(
+            context.bot,
+            update.effective_chat.id,
+            f"Error saving reward structure: {str(e)}",
+        )
+        logger.error(f"Error saving reward structure: {e}", exc_info=True)
         import traceback
 
         traceback.print_exc()
@@ -342,8 +391,10 @@ async def handle_reward_structure(update: Update, context: ContextTypes.DEFAULT_
         session.close()
 
     # Inform creator privately
-    await update.message.reply_text(
-        f"Please deposit a total of {total} Near to this address to activate the quiz:\n{deposit_addr}"
+    await safe_send_message(
+        context.bot,
+        update.effective_chat.id,
+        f"Please deposit a total of {total} Near to this address to activate the quiz:\n{deposit_addr}",
     )
 
     # Announce in group chat
@@ -351,8 +402,9 @@ async def handle_reward_structure(update: Update, context: ContextTypes.DEFAULT_
         if original_group_chat_id:
             # Use a longer timeout for the announcement
             async with asyncio.timeout(10):  # 10 second timeout
-                await context.bot.send_message(
-                    chat_id=original_group_chat_id,
+                await safe_send_message(
+                    context.bot,
+                    original_group_chat_id,
                     text=(
                         f"Quiz '{quiz_topic}' is now funding.\n"
                         f"Creator must deposit {total} Near to activate it.\n"
@@ -360,9 +412,9 @@ async def handle_reward_structure(update: Update, context: ContextTypes.DEFAULT_
                     ),
                 )
     except asyncio.TimeoutError:
-        print(f"Failed to announce to group: Timeout error")
+        logger.error(f"Failed to announce to group: Timeout error")
     except Exception as e:
-        print(f"Failed to announce to group: {e}")
+        logger.error(f"Failed to announce to group: {e}", exc_info=True)
         import traceback
 
         traceback.print_exc()
@@ -377,7 +429,11 @@ async def get_winners(update: Update, context: CallbackContext):
             quiz_id = context.args[0]
             quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
             if not quiz:
-                await update.message.reply_text(f"No quiz found with ID {quiz_id}")
+                await safe_send_message(
+                    context.bot,
+                    update.effective_chat.id,
+                    f"No quiz found with ID {quiz_id}",
+                )
                 return
         else:
             # Get most recent active or closed quiz
@@ -388,15 +444,21 @@ async def get_winners(update: Update, context: CallbackContext):
                 .first()
             )
             if not quiz:
-                await update.message.reply_text("No active or completed quizzes found.")
+                await safe_send_message(
+                    context.bot,
+                    update.effective_chat.id,
+                    "No active or completed quizzes found.",
+                )
                 return
 
         # Calculate winners for the quiz
         winners = QuizAnswer.compute_quiz_winners(session, quiz.id)
 
         if not winners:
-            await update.message.reply_text(
-                f"No participants have answered the '{quiz.topic}' quiz yet."
+            await safe_send_message(
+                context.bot,
+                update.effective_chat.id,
+                f"No participants have answered the '{quiz.topic}' quiz yet.",
             )
             return
 
@@ -429,10 +491,15 @@ async def get_winners(update: Update, context: CallbackContext):
 
         message += f"\n{status}"
 
-        await update.message.reply_text(message, parse_mode="Markdown")
+        await safe_send_message(
+            context.bot, update.effective_chat.id, message, parse_mode="Markdown"
+        )
 
     except Exception as e:
-        await update.message.reply_text(f"Error retrieving winners: {str(e)}")
+        await safe_send_message(
+            context.bot, update.effective_chat.id, f"Error retrieving winners: {str(e)}"
+        )
+        logger.error(f"Error retrieving winners: {e}", exc_info=True)
         import traceback
 
         traceback.print_exc()
