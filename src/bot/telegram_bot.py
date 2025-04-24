@@ -123,8 +123,6 @@ class TelegramBot:
                 "message",
                 "callback_query",
             ],  # Only process specific updates
-            read_timeout=30,  # Increase read timeout
-            timeout=30,  # Increase timeout
         )
         logger.info("Bot is running!")
 
