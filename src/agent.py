@@ -5,6 +5,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from dotenv import find_dotenv, load_dotenv
 import getpass
+import time
 
 # Load environment variables from .env file
 load_dotenv(find_dotenv())
@@ -31,17 +32,45 @@ async def generate_quiz(topic):
 
     prompt = ChatPromptTemplate.from_template(template)
 
-    # Generate the quiz with timeout
+    # Generate the quiz with timeout and retry logic
     messages = prompt.format_messages(topic=topic)
 
-    try:
-        # Add a timeout to prevent hanging
-        response = await asyncio.wait_for(llm.ainvoke(messages), timeout=8.0)
-        return response.content
-    except asyncio.TimeoutError:
-        return "Sorry, quiz generation took too long. Please try a simpler topic."
-    except Exception as e:
-        return f"An error occurred: {str(e)}"
+    max_attempts = 3
+    attempt = 0
+    last_exception = None
+
+    while attempt < max_attempts:
+        try:
+            # Increase timeout to handle slow connections
+            response = await asyncio.wait_for(llm.ainvoke(messages), timeout=15.0)
+            return response.content
+        except asyncio.TimeoutError:
+            attempt += 1
+            last_exception = "Timeout error"
+            print(f"Quiz generation timed out (attempt {attempt}/{max_attempts})")
+            # Wait before retry
+            await asyncio.sleep(1)
+        except Exception as e:
+            attempt += 1
+            last_exception = str(e)
+            print(f"Error generating quiz (attempt {attempt}/{max_attempts}): {e}")
+            await asyncio.sleep(1)
+
+    # If we've exhausted all attempts, return a fallback question
+    print(
+        f"Failed to generate quiz after {max_attempts} attempts. Last error: {last_exception}"
+    )
+    return generate_fallback_quiz(topic)
+
+
+def generate_fallback_quiz(topic):
+    """Generate a simple fallback quiz when the API fails"""
+    return f"""Question: Which of the following is most associated with {topic}?
+A) First option
+B) Second option
+C) Third option
+D) Fourth option
+Correct Answer: A"""
 
 
 async def generate_tweet(topic):

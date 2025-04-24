@@ -16,5 +16,9 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def init_db():
     """Create database tables."""
+    # Drop existing tables to sync new schema (dev only)
+    UserBase.metadata.drop_all(bind=engine)
+    QuizBase.metadata.drop_all(bind=engine)
+    # Create fresh tables
     UserBase.metadata.create_all(bind=engine)
     QuizBase.metadata.create_all(bind=engine)
