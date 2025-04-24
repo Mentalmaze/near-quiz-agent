@@ -5,6 +5,7 @@ from services.quiz_service import (
     play_quiz,
     handle_quiz_answer,
     handle_reward_structure,
+    get_winners,
 )
 from services.user_service import link_wallet
 
@@ -33,3 +34,8 @@ async def quiz_answer_handler(update: Update, context: CallbackContext):
 async def private_message_handler(update: Update, context: CallbackContext):
     """Route private text messages to the appropriate handler."""
     await handle_reward_structure(update, context)
+
+
+async def winners_handler(update: Update, context: CallbackContext):
+    """Handler for /winners command to display quiz results."""
+    await get_winners(update, context)

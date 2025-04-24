@@ -1,6 +1,6 @@
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import CallbackContext, ContextTypes
-from models.quiz import Quiz, QuizStatus
+from models.quiz import Quiz, QuizStatus, QuizAnswer
 from store.database import SessionLocal
 from agent import generate_quiz
 from services.user_service import check_wallet_linked
@@ -166,28 +166,45 @@ async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     # Get quiz from database
     session = SessionLocal()
-    quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
+    try:
+        quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
 
-    if not quiz:
-        await query.edit_message_text("Quiz not found.")
+        if not quiz:
+            await query.edit_message_text("Quiz not found.")
+            return
+
+        # Get correct answer
+        correct_answer = quiz.questions.get("correct", "")
+        is_correct = correct_answer == answer
+
+        # Record the answer in database
+        user_id = str(update.effective_user.id)
+        username = update.effective_user.username or update.effective_user.first_name
+
+        quiz_answer = QuizAnswer(
+            quiz_id=quiz_id,
+            user_id=user_id,
+            username=username,
+            answer=answer,
+            is_correct=is_correct,
+        )
+        session.add(quiz_answer)
+        session.commit()
+
+        # Update message to show result
+        await query.edit_message_text(
+            f"{query.message.text}\n\n"
+            f"Your answer: {answer}\n"
+            f"{'✅ Correct!' if is_correct else f'❌ Wrong. The correct answer is {correct_answer}.'}",
+            reply_markup=None,
+        )
+    except Exception as e:
+        print(f"Error handling quiz answer: {e}")
+        import traceback
+
+        traceback.print_exc()
+    finally:
         session.close()
-        return
-
-    # Get correct answer
-    correct_answer = quiz.questions.get("correct", "")
-    is_correct = correct_answer == answer
-
-    # Update message to show result
-    await query.edit_message_text(
-        f"{query.message.text}\n\n"
-        f"Your answer: {answer}\n"
-        f"{'✅ Correct!' if is_correct else f'❌ Wrong. The correct answer is {correct_answer}.'}",
-        reply_markup=None,
-    )
-
-    # Record the answer (in a real app, store this in the database)
-    # Here we'd track scores and timing for later reward distribution
-    session.close()
 
 
 async def handle_reward_structure(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -288,3 +305,75 @@ async def handle_reward_structure(update: Update, context: ContextTypes.DEFAULT_
         import traceback
 
         traceback.print_exc()
+
+
+async def get_winners(update: Update, context: CallbackContext):
+    """Display current or past quiz winners."""
+    session = SessionLocal()
+    try:
+        # Find specific quiz if ID provided, otherwise get latest active or closed quiz
+        if context.args:
+            quiz_id = context.args[0]
+            quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
+            if not quiz:
+                await update.message.reply_text(f"No quiz found with ID {quiz_id}")
+                return
+        else:
+            # Get most recent active or closed quiz
+            quiz = (
+                session.query(Quiz)
+                .filter(Quiz.status.in_([QuizStatus.ACTIVE, QuizStatus.CLOSED]))
+                .order_by(Quiz.last_updated.desc())
+                .first()
+            )
+            if not quiz:
+                await update.message.reply_text("No active or completed quizzes found.")
+                return
+
+        # Calculate winners for the quiz
+        winners = QuizAnswer.compute_quiz_winners(session, quiz.id)
+
+        if not winners:
+            await update.message.reply_text(
+                f"No participants have answered the '{quiz.topic}' quiz yet."
+            )
+            return
+
+        # Generate leaderboard message
+        message = f"📊 Leaderboard for quiz: *{quiz.topic}*\n\n"
+
+        # Display winners with rewards if available
+        reward_schedule = quiz.reward_schedule or {}
+
+        for i, winner in enumerate(winners[:10]):  # Show top 10 max
+            rank = i + 1
+            username = winner["username"] or f"User{winner['user_id'][-4:]}"
+            correct = winner["correct_count"]
+
+            # Show reward if this position has a reward and quiz is active/closed
+            reward_text = ""
+            if str(rank) in reward_schedule:
+                reward_text = f" - {reward_schedule[str(rank)]} NEAR"
+            elif rank in reward_schedule:
+                reward_text = f" - {reward_schedule[rank]} NEAR"
+
+            message += f"{rank}. @{username}: {correct} correct answers{reward_text}\n"
+
+        # Add quiz status info
+        status = f"Quiz is {quiz.status.value.lower()}"
+        if quiz.status == QuizStatus.CLOSED:
+            status += " and rewards have been distributed."
+        elif quiz.status == QuizStatus.ACTIVE:
+            status += ". Participate with /playquiz"
+
+        message += f"\n{status}"
+
+        await update.message.reply_text(message, parse_mode="Markdown")
+
+    except Exception as e:
+        await update.message.reply_text(f"Error retrieving winners: {str(e)}")
+        import traceback
+
+        traceback.print_exc()
+    finally:
+        session.close()
