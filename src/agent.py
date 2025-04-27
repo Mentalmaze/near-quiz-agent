@@ -6,6 +6,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from dotenv import find_dotenv, load_dotenv
 import getpass
 import time
+import re
 
 # Load environment variables from .env file
 load_dotenv(find_dotenv())
@@ -30,6 +31,10 @@ async def generate_quiz(topic, num_questions=1, context_text=None):
     """
     # Initialize the chat model
     llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", api_key=GOOGLE_API_KEY)
+
+    # Preprocess context text if provided
+    if context_text:
+        context_text = preprocess_text(context_text)
 
     # Create a prompt template based on whether context text is provided
     if context_text:
@@ -145,6 +150,29 @@ async def generate_tweet(topic):
         return "Sorry, tweet generation took too long. Please try a simpler topic."
     except Exception as e:
         return f"An error occurred: {str(e)}"
+
+
+def preprocess_text(text):
+    """Clean and prepare text for quiz generation by removing links, markdown, and other noise."""
+    # Remove links in markdown format [text](url)
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+
+    # Remove standalone URLs
+    text = re.sub(r"https?://\S+", "", text)
+
+    # Remove multiple newlines
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    # Remove markdown headers
+    text = re.sub(r"#{1,6}\s+", "", text)
+
+    # Replace bullet points with clean format
+    text = re.sub(r"^\s*[\*\-•]\s*", "- ", text, flags=re.MULTILINE)
+
+    # Clean up any trailing/leading whitespace
+    text = text.strip()
+
+    return text
 
 
 # Example usage

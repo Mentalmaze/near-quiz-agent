@@ -18,7 +18,57 @@ async def create_quiz(update: Update, context: CallbackContext):
     # Store message for reply reference
     message = update.message
 
-    # Determine if this is a quiz generation with text content
+    # Extract initial command parts
+    command_text = message.text if message.text else ""
+
+    # Check if there's a large text block in the command itself
+    # This handles cases where user includes text directly in the command
+    if "/createquiz" in command_text and len(command_text) > 100:
+        # Extract the command part and the content part
+        parts = command_text.split(None, 1)
+        if len(parts) > 1:
+            large_text = parts[1]
+
+            # Check if the text has parameters at the beginning (topic and question count)
+            topic_pattern = re.compile(r"^([^0-9\n]{3,50}?)(?:\s+(\d+))?\s+", re.DOTALL)
+            topic_match = topic_pattern.match(large_text)
+
+            topic = "Content Analysis"
+            num_questions = 3  # Default to 3 questions for large text
+
+            if topic_match:
+                topic = topic_match.group(1).strip()
+                if topic_match.group(2):
+                    num_questions = min(
+                        int(topic_match.group(2)), 10
+                    )  # Limit to 10 questions
+                # Remove the matched part from the text
+                large_text = large_text[topic_match.end() :].strip()
+
+            await safe_send_message(
+                context.bot,
+                update.effective_chat.id,
+                f"Generating {num_questions} quiz questions about '{topic}' based on the provided text. This may take a moment...",
+            )
+
+            # Generate quiz questions from the large text
+            try:
+                group_chat_id = update.effective_chat.id
+                questions_raw = await generate_quiz(topic, num_questions, large_text)
+                await process_questions(
+                    update, context, topic, questions_raw, group_chat_id
+                )
+                return
+            except Exception as e:
+                logger.error(f"Error creating text-based quiz: {e}", exc_info=True)
+                await safe_send_message(
+                    context.bot,
+                    update.effective_chat.id,
+                    f"Error creating text-based quiz: {str(e)}",
+                )
+                return
+
+    # Determine if this is a quiz generation with text content from a reply
     if message.reply_to_message and message.reply_to_message.text:
         # Command is replying to another message - use that as context text
         context_text = message.reply_to_message.text
