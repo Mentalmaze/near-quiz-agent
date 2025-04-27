@@ -83,6 +83,7 @@ class TelegramBot:
             quiz_answer_handler,
             private_message_handler,
             winners_handler,
+            distribute_rewards_handler,
         )
 
         # Register command handlers
@@ -90,6 +91,9 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("linkwallet", link_wallet_handler))
         self.app.add_handler(CommandHandler("playquiz", play_quiz_handler))
         self.app.add_handler(CommandHandler("winners", winners_handler))
+        self.app.add_handler(
+            CommandHandler("distributerewards", distribute_rewards_handler)
+        )
 
         # Handle callback queries (for quiz answers)
         self.app.add_handler(CallbackQueryHandler(quiz_answer_handler))

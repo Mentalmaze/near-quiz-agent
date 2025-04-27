@@ -728,3 +728,92 @@ async def get_winners(update: Update, context: CallbackContext):
         traceback.print_exc()
     finally:
         session.close()
+
+
+async def distribute_quiz_rewards(update: Update, context: CallbackContext):
+    """Handler for /distributerewards command to send NEAR rewards to winners."""
+    user_id = str(update.effective_user.id)
+
+    # Get quiz ID if provided, otherwise use latest active quiz
+    quiz_id = None
+
+    if context.args:
+        quiz_id = context.args[0]
+    else:
+        # Find latest quiz created by this user
+        session = SessionLocal()
+        try:
+            # We need to find quizzes with rewards that are ACTIVE
+            quiz = (
+                session.query(Quiz)
+                .filter(Quiz.status == QuizStatus.ACTIVE)
+                .order_by(Quiz.last_updated.desc())
+                .first()
+            )
+
+            if quiz:
+                quiz_id = quiz.id
+        finally:
+            session.close()
+
+    if not quiz_id:
+        await safe_send_message(
+            context.bot,
+            update.effective_chat.id,
+            "No active quiz found to distribute rewards for. Please specify a quiz ID.",
+        )
+        return
+
+    # Show processing message
+    processing_msg = await safe_send_message(
+        context.bot,
+        update.effective_chat.id,
+        "🔄 Processing reward distribution... This may take a moment.",
+    )
+
+    try:
+        # Get the blockchain monitor from the application
+        from telegram.ext import Application
+
+        app = context.application
+        if not hasattr(app, "blockchain_monitor"):
+            # Try to access it from another location in context
+            blockchain_monitor = getattr(app, "_blockchain_monitor", None)
+            if not blockchain_monitor:
+                await safe_send_message(
+                    context.bot,
+                    update.effective_chat.id,
+                    "❌ Blockchain monitor not available. Please contact an administrator.",
+                )
+                return
+        else:
+            blockchain_monitor = app.blockchain_monitor
+
+        # Initiate reward distribution
+        success = await blockchain_monitor.distribute_rewards(quiz_id)
+
+        if success:
+            await safe_send_message(
+                context.bot,
+                update.effective_chat.id,
+                f"✅ Successfully distributed rewards for quiz {quiz_id}. Winners have been notified.",
+            )
+        else:
+            await safe_send_message(
+                context.bot,
+                update.effective_chat.id,
+                f"⚠️ Could not distribute all rewards. Check logs for details.",
+            )
+    except Exception as e:
+        logger.error(f"Error distributing rewards: {e}", exc_info=True)
+        await safe_send_message(
+            context.bot,
+            update.effective_chat.id,
+            f"❌ Error distributing rewards: {str(e)}",
+        )
+    finally:
+        # Try to delete the processing message
+        try:
+            await processing_msg.delete()
+        except:
+            pass

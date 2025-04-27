@@ -1,15 +1,25 @@
 import asyncio
+import os
+import time
+import logging
 from datetime import datetime, timedelta
 from models.quiz import Quiz, QuizStatus
 from store.database import SessionLocal
 from utils.config import Config
 import traceback
+from typing import Dict, List, Optional
+
+# Import py-near components
+from pynear.account import Account
+from pynear.dapps.core import NEAR
+
+logger = logging.getLogger(__name__)
 
 
 class BlockchainMonitor:
     """
-    Simulated blockchain monitor - in a real implementation, this would connect to a NEAR RPC
-    node and monitor for transactions to quiz deposit addresses.
+    NEAR blockchain monitor - connects to NEAR RPC nodes to monitor transactions
+    and handle deposits/withdrawals for quiz rewards.
     """
 
     def __init__(self, bot):
@@ -17,15 +27,60 @@ class BlockchainMonitor:
         self.bot = bot
         self._running = False
         self._monitor_task = None
+        self.near_account: Optional[Account] = None
+        self._init_near_account()
+
+    def _init_near_account(self):
+        """Initialize NEAR account for blockchain operations."""
+        try:
+            private_key = Config.NEAR_WALLET_PRIVATE_KEY
+            account_id = Config.NEAR_WALLET_ADDRESS
+
+            if not private_key or not account_id:
+                logger.error("Missing NEAR wallet credentials in configuration")
+                return
+
+            # Initialize the NEAR account
+            self.near_account = Account(account_id, private_key)
+            logger.info(f"NEAR account initialized with address: {account_id}")
+        except Exception as e:
+            logger.error(f"Failed to initialize NEAR account: {e}")
+            traceback.print_exc()
+
+    async def startup_near_account(self):
+        """Start up the NEAR account connection."""
+        if not self.near_account:
+            logger.error("Cannot start NEAR account - not initialized")
+            return False
+
+        try:
+            # Initialize connection to NEAR blockchain
+            await self.near_account.startup()
+            balance = await self.near_account.get_balance()
+            logger.info(
+                f"Connected to NEAR blockchain. Account balance: {balance/NEAR:.4f} NEAR"
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Failed to connect to NEAR blockchain: {e}")
+            traceback.print_exc()
+            return False
 
     async def start_monitoring(self):
         """Start the blockchain monitoring service."""
         if self._running:
             return
 
+        # Initialize NEAR connection first
+        if not await self.startup_near_account():
+            logger.error(
+                "Failed to start blockchain monitor due to NEAR connection failure"
+            )
+            return
+
         self._running = True
         self._monitor_task = asyncio.create_task(self._monitor_loop())
-        print("Blockchain monitor started")
+        logger.info("Blockchain monitor started")
 
     async def stop_monitoring(self):
         """Stop the blockchain monitoring service."""
@@ -39,7 +94,7 @@ class BlockchainMonitor:
                 await self._monitor_task
             except asyncio.CancelledError:
                 pass
-        print("Blockchain monitor stopped")
+        logger.info("Blockchain monitor stopped")
 
     async def _monitor_loop(self):
         """Continuously monitor for deposits to quiz addresses."""
@@ -69,20 +124,23 @@ class BlockchainMonitor:
                 for quiz_id in quiz_ids_to_process:
                     await self._check_deposit(quiz_id)
 
-                # Check every 30 seconds (would be longer in production)
-                await asyncio.sleep(30)
+                # Check every 60 seconds
+                await asyncio.sleep(60)
             except Exception as e:
-                print(f"Error in blockchain monitor: {e}")
+                logger.error(f"Error in blockchain monitor: {e}")
                 traceback.print_exc()
-                await asyncio.sleep(30)
+                await asyncio.sleep(60)
 
     async def _check_deposit(self, quiz_id):
         """
-        Simulate checking for deposits to a quiz address.
+        Check for deposits to a quiz address on the NEAR blockchain.
 
-        In a real implementation, this would query the NEAR RPC for transactions
-        to the deposit address and verify sufficient funds were received.
+        Verifies if sufficient funds were received using NEAR RPC calls.
         """
+        if not self.near_account:
+            logger.error("Cannot check deposits - NEAR account not initialized")
+            return
+
         # Open a new session for this operation
         session = SessionLocal()
         try:
@@ -91,45 +149,218 @@ class BlockchainMonitor:
             if not quiz or quiz.status != QuizStatus.FUNDING:
                 return
 
-            # Check if quiz has been in FUNDING status for more than 1 minute
-            # In a real implementation, we would check the blockchain for actual deposits
-            if datetime.utcnow() - quiz.last_updated > timedelta(minutes=1):
-                # Update quiz to ACTIVE and commit immediately
-                quiz.status = QuizStatus.ACTIVE
-                total_reward = (
-                    sum(int(value) for value in quiz.reward_schedule.values())
-                    if quiz.reward_schedule
-                    else 0
+            deposit_address = quiz.deposit_address
+            required_amount = (
+                sum(int(value) for value in quiz.reward_schedule.values())
+                if quiz.reward_schedule
+                else 0
+            )
+
+            # Use py-near to check the blockchain for deposits
+            try:
+                # Fetch the balance of the deposit address
+                deposit_balance = await self.near_account.get_balance(deposit_address)
+                logger.info(
+                    f"Checked balance for quiz {quiz_id}: {deposit_balance/NEAR:.4f} NEAR"
                 )
-                group_chat_id = quiz.group_chat_id
-                topic = quiz.topic
 
-                session.commit()
-                session.close()
-                session = None  # Prevent further usage
+                # Check if sufficient funds received
+                if deposit_balance >= required_amount * NEAR:
+                    # Update quiz to ACTIVE and commit immediately
+                    quiz.status = QuizStatus.ACTIVE
+                    total_reward = required_amount
+                    group_chat_id = quiz.group_chat_id
+                    topic = quiz.topic
 
-                # Announce the quiz is active in the original group chat
-                try:
-                    if group_chat_id:
-                        # Use longer timeout for the announcement
-                        async with asyncio.timeout(10):  # 10 second timeout
-                            await self.bot.send_message(
-                                chat_id=group_chat_id,
-                                text=f"📣 New quiz '{topic}' is now active! 🎯\n"
-                                f"Total rewards: {total_reward} NEAR\n"
-                                f"Type /playquiz to participate!",
-                            )
-                except asyncio.TimeoutError:
-                    print(f"Failed to announce active quiz: Timed out")
-                except Exception as e:
-                    print(f"Failed to announce active quiz: {e}")
-                    traceback.print_exc()
+                    session.commit()
+                    session.close()
+                    session = None  # Prevent further usage
+
+                    # Announce the quiz is active in the original group chat
+                    try:
+                        if group_chat_id:
+                            # Use longer timeout for the announcement
+                            async with asyncio.timeout(10):  # 10 second timeout
+                                await self.bot.send_message(
+                                    chat_id=group_chat_id,
+                                    text=f"📣 New quiz '{topic}' is now active! 🎯\n"
+                                    f"Total rewards: {total_reward} NEAR\n"
+                                    f"Type /playquiz to participate!",
+                                )
+                                logger.info(
+                                    f"Quiz {quiz_id} activated with {total_reward} NEAR"
+                                )
+                    except asyncio.TimeoutError:
+                        logger.error(f"Failed to announce active quiz: Timed out")
+                    except Exception as e:
+                        logger.error(f"Failed to announce active quiz: {e}")
+                        traceback.print_exc()
+                else:
+                    logger.debug(
+                        f"Insufficient funds for quiz {quiz_id}: {deposit_balance/NEAR:.4f}/{required_amount} NEAR"
+                    )
+            except Exception as e:
+                logger.error(f"Error checking blockchain for deposits: {e}")
+                traceback.print_exc()
+
         except Exception as e:
-            print(f"Error checking deposit: {e}")
+            logger.error(f"Error checking deposit: {e}")
             traceback.print_exc()
         finally:
             # Always ensure session is closed
             if session is not None:
+                session.close()
+
+    async def distribute_rewards(self, quiz_id: str) -> bool:
+        """
+        Distribute rewards to quiz winners based on the defined reward schedule.
+
+        Args:
+            quiz_id: ID of the quiz to distribute rewards for
+
+        Returns:
+            bool: True if rewards were successfully distributed, False otherwise
+        """
+        if not self.near_account:
+            logger.error("Cannot distribute rewards - NEAR account not initialized")
+            return False
+
+        # Open a new session for this operation
+        session = SessionLocal()
+        try:
+            # Get quiz data and confirm it's in ACTIVE status
+            quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
+            if not quiz:
+                logger.error(f"Quiz {quiz_id} not found")
+                return False
+
+            if quiz.status == QuizStatus.CLOSED:
+                logger.info(f"Quiz {quiz_id} already closed and rewards distributed")
+                return True
+
+            if quiz.status != QuizStatus.ACTIVE:
+                logger.error(
+                    f"Quiz {quiz_id} not in ACTIVE state, cannot distribute rewards"
+                )
+                return False
+
+            # Get winners from database
+            from models.quiz import QuizAnswer
+
+            winners = QuizAnswer.compute_quiz_winners(session, quiz_id)
+            if not winners:
+                logger.warning(f"No winners found for quiz {quiz_id}")
+                return False
+
+            # Get wallet addresses for winners
+            from models.user import User
+
+            reward_schedule = quiz.reward_schedule
+
+            # Track successful transfers
+            successful_transfers = []
+
+            # Process each winner according to reward schedule
+            for rank, winner_data in enumerate(winners, 1):
+                user_id = winner_data["user_id"]
+                user = session.query(User).filter(User.id == user_id).first()
+
+                # Skip if no wallet linked
+                if not user or not user.wallet_address:
+                    logger.warning(f"No wallet linked for user {user_id}, rank {rank}")
+                    continue
+
+                # Check if there's a reward for this rank
+                reward_amount = None
+                if str(rank) in reward_schedule:
+                    reward_amount = int(reward_schedule[str(rank)])
+                elif rank in reward_schedule:
+                    reward_amount = int(reward_schedule[rank])
+
+                if not reward_amount:
+                    logger.debug(f"No reward defined for rank {rank}")
+                    continue
+
+                # Send NEAR to the winner's wallet
+                try:
+                    logger.info(
+                        f"Sending {reward_amount} NEAR to {user.wallet_address} (rank {rank})"
+                    )
+
+                    # Convert to yoctoNEAR (1 NEAR = 10^24 yoctoNEAR)
+                    yocto_amount = reward_amount * NEAR
+
+                    # Execute transfer
+                    transaction = await self.near_account.send_money(
+                        user.wallet_address, yocto_amount
+                    )
+
+                    # Record successful transfer
+                    successful_transfers.append(
+                        {
+                            "user_id": user_id,
+                            "wallet": user.wallet_address,
+                            "amount": reward_amount,
+                            "tx_hash": transaction.transaction.hash,
+                        }
+                    )
+
+                    logger.info(
+                        f"Successfully sent {reward_amount} NEAR to {user.wallet_address}, tx: {transaction.transaction.hash}"
+                    )
+
+                except Exception as e:
+                    logger.error(
+                        f"Failed to transfer {reward_amount} NEAR to {user.wallet_address}: {e}"
+                    )
+                    traceback.print_exc()
+
+            # If at least some transfers were successful, mark quiz as closed
+            if successful_transfers:
+                quiz.status = QuizStatus.CLOSED
+                session.commit()
+
+                # Announce winners in group chat
+                if quiz.group_chat_id:
+                    winners_text = "🏆 Quiz Results! 🏆\n\n"
+
+                    for rank, winner in enumerate(winners[:3], 1):  # Show top 3
+                        username = winner["username"] or f"User{winner['user_id'][-4:]}"
+                        reward = (
+                            reward_schedule.get(str(rank))
+                            or reward_schedule.get(rank)
+                            or "0"
+                        )
+
+                        # Check if this user received payment
+                        paid_status = (
+                            "✅"
+                            if any(
+                                t["user_id"] == winner["user_id"]
+                                for t in successful_transfers
+                            )
+                            else "⏳"
+                        )
+                        winners_text += f"{rank}. @{username}: {winner['correct_count']} correct - {reward} NEAR {paid_status}\n"
+
+                    try:
+                        await self.bot.send_message(
+                            chat_id=quiz.group_chat_id,
+                            text=winners_text
+                            + "\n💰 Rewards have been distributed to winners' NEAR wallets!",
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to announce winners: {e}")
+
+                return True
+            return False
+
+        except Exception as e:
+            logger.error(f"Error distributing rewards for quiz {quiz_id}: {e}")
+            traceback.print_exc()
+            return False
+        finally:
+            if session:
                 session.close()
 
 
