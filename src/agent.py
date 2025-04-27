@@ -16,24 +16,61 @@ if not GOOGLE_API_KEY:
     GOOGLE_API_KEY = getpass.getpass("Enter your Google API key: ")
 
 
-async def generate_quiz(topic):
+async def generate_quiz(topic, num_questions=1, context_text=None):
+    """
+    Generate a multiple choice quiz about a topic.
+
+    Args:
+        topic: The topic to generate questions about
+        num_questions: Number of questions to generate (default: 1)
+        context_text: Optional text to use as context for generating questions
+
+    Returns:
+        String containing formatted quiz questions
+    """
     # Initialize the chat model
     llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", api_key=GOOGLE_API_KEY)
 
-    # Create a prompt template for quiz generation
-    template = """Generate a multiple choice quiz question about {topic}.
-    Please format it as follows:
-    Question: [question]
-    A) [option]
-    B) [option]
-    C) [option]
-    D) [option]
-    Correct Answer: [letter]"""
+    # Create a prompt template based on whether context text is provided
+    if context_text:
+        template = """Generate {num_questions} multiple choice quiz question(s) based on the following text about {topic}:
+
+        TEXT:
+        {context_text}
+
+        Please format each question as follows:
+        Question: [question]
+        A) [option]
+        B) [option]
+        C) [option]
+        D) [option]
+        Correct Answer: [letter]
+
+        Make sure to extract relevant information from the text to create challenging questions.
+        Number each question if generating multiple questions.
+        """
+    else:
+        template = """Generate {num_questions} multiple choice quiz question(s) about {topic}.
+
+        Please format each question as follows:
+        Question: [question]
+        A) [option]
+        B) [option]
+        C) [option]
+        D) [option]
+        Correct Answer: [letter]
+
+        Number each question if generating multiple questions.
+        """
 
     prompt = ChatPromptTemplate.from_template(template)
 
     # Generate the quiz with timeout and retry logic
-    messages = prompt.format_messages(topic=topic)
+    messages = prompt.format_messages(
+        topic=topic,
+        num_questions=num_questions,
+        context_text=context_text if context_text else "",
+    )
 
     max_attempts = 3
     attempt = 0
@@ -41,8 +78,13 @@ async def generate_quiz(topic):
 
     while attempt < max_attempts:
         try:
-            # Increase timeout to handle slow connections
-            response = await asyncio.wait_for(llm.ainvoke(messages), timeout=15.0)
+            # Increase timeout for multiple questions or long text
+            timeout = 15.0 * (
+                1
+                + (0.5 * min(int(num_questions), 10))
+                + (0.01 * min(len(context_text or ""), 1000))
+            )
+            response = await asyncio.wait_for(llm.ainvoke(messages), timeout=timeout)
             return response.content
         except asyncio.TimeoutError:
             attempt += 1
@@ -60,17 +102,23 @@ async def generate_quiz(topic):
     print(
         f"Failed to generate quiz after {max_attempts} attempts. Last error: {last_exception}"
     )
-    return generate_fallback_quiz(topic)
+    return generate_fallback_quiz(topic, num_questions)
 
 
-def generate_fallback_quiz(topic):
+def generate_fallback_quiz(topic, num_questions=1):
     """Generate a simple fallback quiz when the API fails"""
-    return f"""Question: Which of the following is most associated with {topic}?
+    questions = []
+    for i in range(1, int(num_questions) + 1):
+        questions.append(
+            f"""Question {i}: Which of the following is most associated with {topic}?
 A) First option
 B) Second option
 C) Third option
 D) Fourth option
 Correct Answer: A"""
+        )
+
+    return "\n\n".join(questions)
 
 
 async def generate_tweet(topic):
