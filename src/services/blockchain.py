@@ -9,9 +9,11 @@ from utils.config import Config
 import traceback
 from typing import Dict, List, Optional
 
+from py_near.account import Account
+
 # Import py-near components
-from pynear.account import Account
-from pynear.dapps.core import NEAR
+# from pynear.account import Account
+from py_near.dapps.core import NEAR
 
 logger = logging.getLogger(__name__)
 
@@ -35,13 +37,18 @@ class BlockchainMonitor:
         try:
             private_key = Config.NEAR_WALLET_PRIVATE_KEY
             account_id = Config.NEAR_WALLET_ADDRESS
+            rpc_addr = Config.NEAR_RPC_ENDPOINT
 
             if not private_key or not account_id:
                 logger.error("Missing NEAR wallet credentials in configuration")
                 return
 
+            if not rpc_addr:
+                logger.error("Missing NEAR RPC endpoint in configuration")
+                return
+
             # Initialize the NEAR account
-            self.near_account = Account(account_id, private_key)
+            self.near_account = Account(account_id, private_key, rpc_addr=rpc_addr)
             logger.info(f"NEAR account initialized with address: {account_id}")
         except Exception as e:
             logger.error(f"Failed to initialize NEAR account: {e}")

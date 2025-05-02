@@ -37,12 +37,14 @@ async def handle_wallet_address(update: Update, context: CallbackContext):
 
     try:
         # Basic validation
-        if not wallet_address.endswith(".near"):
+        # Check if address ends with valid suffix based on environment
+        valid_suffixes = [".near", ".testnet"]  # Can be configured based on environment
+        if not any(wallet_address.endswith(suffix) for suffix in valid_suffixes):
             await safe_send_message(
                 context.bot,
                 update.effective_chat.id,
                 "That doesn't look like a valid NEAR address. "
-                "Please make sure it ends with '.near'",
+                "Please make sure it ends with '.near' for mainnet or '.testnet' for testnet.",
             )
             return
 

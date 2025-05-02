@@ -10,6 +10,7 @@ import uuid
 import json
 import asyncio
 import logging
+from utils.config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -566,7 +567,10 @@ async def handle_reward_structure(update: Update, context: ContextTypes.DEFAULT_
     total = sum(schedule.values())
 
     # Generate deposit address (dummy for now)
-    deposit_addr = f"quiz-{uuid.uuid4()}.near"
+    # deposit_addr = f"quiz-{uuid.uuid4()}.near"
+    #
+    #
+    deposit_addr = Config.NEAR_WALLET_ADDRESS
 
     # We'll save these for the group announcement
     quiz_topic = None
