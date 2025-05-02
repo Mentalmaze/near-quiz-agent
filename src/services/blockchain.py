@@ -377,3 +377,4 @@ async def start_blockchain_monitor(bot):
     monitor = BlockchainMonitor(bot)
     await monitor.start_monitoring()
     return monitor
+
