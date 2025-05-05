@@ -30,17 +30,17 @@ async def create_quiz(update: Update, context: CallbackContext):
     duration_minutes = None
 
     # Check for different duration formats
-    days_match = re.search(r'for\s+(\d+)\s+days', command_text, re.IGNORECASE)
+    days_match = re.search(r"for\s+(\d+)\s+days", command_text, re.IGNORECASE)
     if days_match:
         duration_days = int(days_match.group(1))
         logger.info(f"Detected quiz duration: {duration_days} days")
 
-    hours_match = re.search(r'for\s+(\d+)\s+hours', command_text, re.IGNORECASE)
+    hours_match = re.search(r"for\s+(\d+)\s+hours", command_text, re.IGNORECASE)
     if hours_match:
         duration_hours = int(hours_match.group(1))
         logger.info(f"Detected quiz duration: {duration_hours} hours")
 
-    minutes_match = re.search(r'for\s+(\d+)\s+minutes', command_text, re.IGNORECASE)
+    minutes_match = re.search(r"for\s+(\d+)\s+minutes", command_text, re.IGNORECASE)
     if minutes_match:
         duration_minutes = int(minutes_match.group(1))
         logger.info(f"Detected quiz duration: {duration_minutes} minutes")
@@ -59,17 +59,56 @@ async def create_quiz(update: Update, context: CallbackContext):
         duration_text += f"{duration_minutes} minutes"
 
     if total_minutes > 0:
-        logger.info(f"Total quiz duration: {total_minutes} minutes ({duration_text.strip()})")
+        logger.info(
+            f"Total quiz duration: {total_minutes} minutes ({duration_text.strip()})"
+        )
 
     # Next, check if number of questions is specified
     num_questions = None
-    questions_match = re.search(r'(\d+)\s+questions', command_text, re.IGNORECASE)
+    questions_match = re.search(r"(\d+)\s+questions", command_text, re.IGNORECASE)
     if questions_match:
         num_questions = min(int(questions_match.group(1)), 10)  # Limit to 10 max
         logger.info(f"Detected number of questions: {num_questions}")
 
     # Also check for simple "Topic X" format where X is a number
     if num_questions is None:
+        simple_num_match = re.search(
+            r"(?:near|topic)\s+(\d+)", command_text, re.IGNORECASE
+        )
+        if simple_num_match:
+            num_questions = min(int(simple_num_match.group(1)), 10)
+            logger.info(f"Detected simple number format: {num_questions} questions")
+
+    # Extract topic from the command
+    topic = None
+    # Try to find the topic between "createquiz" and any number indicators
+    topic_match = re.search(
+        r"/createquiz\s+(.*?)(?:\s+\d+\s+questions|\s+for\s+\d+\s+(?:days|hours|minutes)|$)",
+        command_text,
+        re.IGNORECASE,
+    )
+    if topic_match:
+        topic = topic_match.group(1).strip()
+
+    if not topic and context.args:
+        # If no topic found in regex, use the first argument
+        topic = context.args[0]
+
+    # If we still don't have a topic, show usage
+    if not topic:
+        await safe_send_message(
+            context.bot,
+            update.effective_chat.id,
+            "Usage: /createquiz <topic> [number] questions [for number days/hours/minutes]\n"
+            "Examples:\n"
+            "- /createquiz NEAR blockchain\n"
+            "- /createquiz NEAR 5 questions\n"
+            "- /createquiz NEAR for 7 days\n"
+            "- /createquiz NEAR for 3 hours\n"
+            "- /createquiz NEAR for 30 minutes\n"
+            "- /createquiz NEAR 3 questions for 14 days",
+        )
+        return
 
     # If no number of questions specified yet, default to 3
     if num_questions is None:
@@ -78,7 +117,9 @@ async def create_quiz(update: Update, context: CallbackContext):
     # Check if there's a large text block in the command itself
     # This handles cases where user includes text directly in the command
     if len(command_text) > 100:
-        large_text_match = re.search(r'(/createquiz[^\n]+)(.+)', command_text, re.DOTALL)
+        large_text_match = re.search(
+            r"(/createquiz[^\n]+)(.+)", command_text, re.DOTALL
+        )
         if large_text_match:
             large_text = large_text_match.group(2).strip()
 
@@ -93,7 +134,14 @@ async def create_quiz(update: Update, context: CallbackContext):
                 group_chat_id = update.effective_chat.id
                 questions_raw = await generate_quiz(topic, num_questions, large_text)
                 await process_questions(
-                    update, context, topic, questions_raw, group_chat_id, duration_days
+                    update,
+                    context,
+                    topic,
+                    questions_raw,
+                    group_chat_id,
+                    duration_days,
+                    duration_hours,
+                    duration_minutes,
                 )
                 return
             except Exception as e:
@@ -110,21 +158,6 @@ async def create_quiz(update: Update, context: CallbackContext):
         # Command is replying to another message - use that as context text
         context_text = message.reply_to_message.text
 
-        # Extract parameters from the command
-        args = context.args
-
-        # Default topic and num_questions
-        topic = "General Knowledge"
-        num_questions = 1
-
-        if args:
-            # First argument is the topic
-            topic = args[0]
-
-            # Check if second argument is the number of questions
-            if len(args) > 1 and args[1].isdigit():
-                num_questions = min(int(args[1]), 10)  # Limit to 10 questions max
-
         await safe_send_message(
             context.bot,
             update.effective_chat.id,
@@ -139,7 +172,14 @@ async def create_quiz(update: Update, context: CallbackContext):
             # Generate questions based on the text
             questions_raw = await generate_quiz(topic, num_questions, context_text)
             await process_questions(
-                update, context, topic, questions_raw, group_chat_id
+                update,
+                context,
+                topic,
+                questions_raw,
+                group_chat_id,
+                duration_days,
+                duration_hours,
+                duration_minutes,
             )
 
         except Exception as e:
@@ -151,25 +191,6 @@ async def create_quiz(update: Update, context: CallbackContext):
             )
     else:
         # Regular quiz creation
-        # If no arguments provided, show usage message
-        if not context.args:
-            await safe_send_message(
-                context.bot,
-                update.effective_chat.id,
-                "Usage: /createquiz <topic> [number_of_questions]\n"
-                "Or reply to a text message with: /createquiz <topic> [number_of_questions]",
-            )
-            return
-
-        # Extract topic and optional number of questions
-        args = context.args
-        topic = args[0]
-
-        # Check if second argument is number of questions
-        num_questions = 1
-        if len(args) > 1 and args[1].isdigit():
-            num_questions = min(int(args[1]), 10)  # Limit to 10 questions max
-
         try:
             # Inform user
             await safe_send_message(
@@ -184,7 +205,14 @@ async def create_quiz(update: Update, context: CallbackContext):
             # Generate questions via LLM
             questions_raw = await generate_quiz(topic, num_questions)
             await process_questions(
-                update, context, topic, questions_raw, group_chat_id
+                update,
+                context,
+                topic,
+                questions_raw,
+                group_chat_id,
+                duration_days,
+                duration_hours,
+                duration_minutes,
             )
 
         except asyncio.TimeoutError:
@@ -200,7 +228,16 @@ async def create_quiz(update: Update, context: CallbackContext):
             )
 
 
-async def process_questions(update, context, topic, questions_raw, group_chat_id, duration_days=None):
+async def process_questions(
+    update,
+    context,
+    topic,
+    questions_raw,
+    group_chat_id,
+    duration_days=None,
+    duration_hours=None,
+    duration_minutes=None,
+):
     """Process multiple questions from raw text and save them as a quiz."""
 
     # Parse multiple questions
@@ -217,8 +254,14 @@ async def process_questions(update, context, topic, questions_raw, group_chat_id
 
     # Calculate end time if duration was specified
     end_time = None
-    if duration_days:
-        end_time = datetime.utcnow() + timedelta(days=duration_days)
+    if duration_days or duration_hours or duration_minutes:
+        end_time = datetime.utcnow()
+        if duration_days:
+            end_time += timedelta(days=duration_days)
+        if duration_hours:
+            end_time += timedelta(hours=duration_hours)
+        if duration_minutes:
+            end_time += timedelta(minutes=duration_minutes)
 
     # Persist quiz with multiple questions
     session = SessionLocal()
@@ -263,7 +306,9 @@ async def process_questions(update, context, topic, questions_raw, group_chat_id
             context.application.create_task(
                 schedule_auto_distribution(context.bot, quiz_id, seconds_until_end)
             )
-            logger.info(f"Scheduled auto distribution for quiz {quiz_id} in {seconds_until_end} seconds")
+            logger.info(
+                f"Scheduled auto distribution for quiz {quiz_id} in {seconds_until_end} seconds"
+            )
 
 
 async def schedule_auto_distribution(bot, quiz_id, delay_seconds):
@@ -282,7 +327,9 @@ async def schedule_auto_distribution(bot, quiz_id, delay_seconds):
 
             # Skip if quiz is not in ACTIVE state
             if quiz.status != QuizStatus.ACTIVE:
-                logger.info(f"Quiz {quiz_id} is not in ACTIVE state, skipping auto distribution")
+                logger.info(
+                    f"Quiz {quiz_id} is not in ACTIVE state, skipping auto distribution"
+                )
                 return
 
             # Get group chat ID for notification
@@ -303,11 +350,13 @@ async def schedule_auto_distribution(bot, quiz_id, delay_seconds):
         blockchain_monitor = getattr(application, "blockchain_monitor", None)
 
         if not blockchain_monitor:
-            logger.error(f"Cannot perform auto distribution for quiz {quiz_id}: blockchain monitor not available")
+            logger.error(
+                f"Cannot perform auto distribution for quiz {quiz_id}: blockchain monitor not available"
+            )
             if group_chat_id:
                 await bot.send_message(
                     chat_id=group_chat_id,
-                    text=f"⚠️ Quiz '{topic}' has ended but automatic reward distribution failed. Please use /distributerewards {quiz_id} to distribute rewards manually."
+                    text=f"⚠️ Quiz '{topic}' has ended but automatic reward distribution failed. Please use /distributerewards {quiz_id} to distribute rewards manually.",
                 )
             return
 
@@ -317,12 +366,12 @@ async def schedule_auto_distribution(bot, quiz_id, delay_seconds):
         if success and group_chat_id:
             await bot.send_message(
                 chat_id=group_chat_id,
-                text=f"🏆 Quiz '{topic}' has ended and rewards have been automatically distributed to winners!"
+                text=f"🏆 Quiz '{topic}' has ended and rewards have been automatically distributed to winners!",
             )
         elif not success and group_chat_id:
             await bot.send_message(
                 chat_id=group_chat_id,
-                text=f"⚠️ Quiz '{topic}' has ended but automatic reward distribution failed. Please use /distributerewards {quiz_id} to distribute rewards manually."
+                text=f"⚠️ Quiz '{topic}' has ended but automatic reward distribution failed. Please use /distributerewards {quiz_id} to distribute rewards manually.",
             )
 
     except Exception as e:
@@ -414,13 +463,7 @@ def parse_questions(raw_questions):
                 result["options"][letter] = text
                 break
 
-        # Check for correct answer in various formats
-        correct_match = correct_pattern.match(line)
-        if correct_match or "Correct Answer" in line or "Answer:" in line:
-            if correct_match:
-                result["correct"] = correct_match.group(1).strip()
-            else:
-                # Extract just the letter from lines like "Correct Answer: A"
+                # Check for correct answer in various formats
                 answer_parts = line.split(":")
                 if len(answer_parts) > 1:
                     possible_letter = answer_parts[-1].strip()
