@@ -37,57 +37,16 @@ async def handle_wallet_address(update: Update, context: CallbackContext):
 
     try:
         # Basic validation
-        # Check if address ends with valid suffix based on environment
-        valid_suffixes = [".near", ".testnet"]  # Can be configured based on environment
-        if not any(wallet_address.endswith(suffix) for suffix in valid_suffixes):
+        if not wallet_address.endswith(".near") and not wallet_address.endswith(".testnet"):
             await safe_send_message(
                 context.bot,
                 update.effective_chat.id,
                 "That doesn't look like a valid NEAR address. "
-                "Please make sure it ends with '.near' for mainnet or '.testnet' for testnet.",
+                "Please make sure it ends with '.near' or '.testnet'",
             )
             return
 
-        # Generate verification challenge
-        challenge = str(uuid.uuid4())
-        context.user_data["challenge"] = challenge
-        context.user_data["wallet_address"] = wallet_address
-        context.user_data["awaiting"] = "signature"
-
-        # In a real implementation, we'd have the user sign this message
-        # Here we'll simulate by just asking them to confirm
-        await safe_send_message(
-            context.bot,
-            update.effective_chat.id,
-            f"Please sign this message with your wallet: '{challenge}'\n\n"
-            f"For this demo version, just reply with 'SIGNED' to simulate verification.",
-        )
-    except Exception as e:
-        logger.error(f"Error handling wallet address: {e}", exc_info=True)
-        await safe_send_message(
-            context.bot,
-            update.effective_chat.id,
-            f"An error occurred while processing your wallet address. Please try again later.",
-        )
-
-
-async def handle_signature(update: Update, context: CallbackContext):
-    """Process the signed message (simulated in this demo)."""
-    try:
-        signature = update.message.text.strip()
-        if signature.upper() != "SIGNED":  # Simple simulation
-            await safe_send_message(
-                context.bot,
-                update.effective_chat.id,
-                "Invalid signature. Please try again.",
-            )
-            return
-
-        # Get data from context
-        user_id = str(update.effective_user.id)
-        wallet_address = context.user_data.get("wallet_address")
-
-        # Create or update user in database
+        # Skip the challenge/signature part and directly save the wallet address
         session = SessionLocal()
         try:
             user = session.query(User).filter(User.id == user_id).first()
@@ -99,27 +58,33 @@ async def handle_signature(update: Update, context: CallbackContext):
             session.commit()
         finally:
             session.close()
-
+        
         # Clear awaiting state
         if "awaiting" in context.user_data:
             del context.user_data["awaiting"]
-        if "challenge" in context.user_data:
-            del context.user_data["challenge"]
-        if "wallet_address" in context.user_data:
-            del context.user_data["wallet_address"]
 
+        # Confirm wallet link to the user
         await safe_send_message(
             context.bot,
             update.effective_chat.id,
             f"Wallet {wallet_address} linked successfully! You're ready to play quizzes.",
         )
+            
     except Exception as e:
-        logger.error(f"Error handling signature verification: {e}", exc_info=True)
+        logger.error(f"Error handling wallet address: {e}", exc_info=True)
         await safe_send_message(
             context.bot,
             update.effective_chat.id,
-            f"An error occurred during wallet verification. Please try again later.",
+            f"An error occurred while processing your wallet address. Please try again later.",
         )
+
+
+async def handle_signature(update: Update, context: CallbackContext):
+    """
+    Legacy method maintained for backward compatibility.
+    Signature verification is now skipped.
+    """
+    pass
 
 
 async def check_wallet_linked(user_id: str) -> bool:

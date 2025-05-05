@@ -10,6 +10,8 @@ import uuid
 import json
 import asyncio
 import logging
+from datetime import datetime, timedelta
+import traceback
 from utils.config import Config
 
 logger = logging.getLogger(__name__)
@@ -22,30 +24,64 @@ async def create_quiz(update: Update, context: CallbackContext):
     # Extract initial command parts
     command_text = message.text if message.text else ""
 
+    # First, check if duration is specified in the command
+    # Format like "createquiz near for 22 days" or "createquiz near 5 questions for 7 days"
+    duration_days = None
+    duration_match = re.search(r'for\s+(\d+)\s+days', command_text, re.IGNORECASE)
+    if duration_match:
+        duration_days = int(duration_match.group(1))
+        logger.info(f"Detected quiz duration: {duration_days} days")
+
+    # Next, check if number of questions is specified
+    num_questions = None
+    questions_match = re.search(r'(\d+)\s+questions', command_text, re.IGNORECASE)
+    if questions_match:
+        num_questions = min(int(questions_match.group(1)), 10)  # Limit to 10 max
+        logger.info(f"Detected number of questions: {num_questions}")
+    
+    # Also check for simple "Topic X" format where X is a number
+    if num_questions is None:
+        simple_num_match = re.search(r'(?:near|topic)\s+(\d+)', command_text, re.IGNORECASE)
+        if simple_num_match:
+            num_questions = min(int(simple_num_match.group(1)), 10)
+            logger.info(f"Detected simple number format: {num_questions} questions")
+    
+    # Extract topic from the command
+    topic = None
+    # Try to find the topic between "createquiz" and any number indicators
+    topic_match = re.search(r'/createquiz\s+(.*?)(?:\s+\d+\s+questions|\s+for\s+\d+\s+days|$)', command_text, re.IGNORECASE)
+    if topic_match:
+        topic = topic_match.group(1).strip()
+    
+    if not topic and context.args:
+        # If no topic found in regex, use the first argument
+        topic = context.args[0]
+    
+    # If we still don't have a topic, show usage
+    if not topic:
+        await safe_send_message(
+            context.bot,
+            update.effective_chat.id,
+            "Usage: /createquiz <topic> [number] questions [for number days]\n"
+            "Examples:\n"
+            "- /createquiz NEAR blockchain\n"
+            "- /createquiz NEAR 5 questions\n"
+            "- /createquiz NEAR for 7 days\n"
+            "- /createquiz NEAR 3 questions for 14 days",
+        )
+        return
+
+    # If no number of questions specified yet, default to 3
+    if num_questions is None:
+        num_questions = 3
+
     # Check if there's a large text block in the command itself
     # This handles cases where user includes text directly in the command
-    if "/createquiz" in command_text and len(command_text) > 100:
-        # Extract the command part and the content part
-        parts = command_text.split(None, 1)
-        if len(parts) > 1:
-            large_text = parts[1]
-
-            # Check if the text has parameters at the beginning (topic and question count)
-            topic_pattern = re.compile(r"^([^0-9\n]{3,50}?)(?:\s+(\d+))?\s+", re.DOTALL)
-            topic_match = topic_pattern.match(large_text)
-
-            topic = "Content Analysis"
-            num_questions = 3  # Default to 3 questions for large text
-
-            if topic_match:
-                topic = topic_match.group(1).strip()
-                if topic_match.group(2):
-                    num_questions = min(
-                        int(topic_match.group(2)), 10
-                    )  # Limit to 10 questions
-                # Remove the matched part from the text
-                large_text = large_text[topic_match.end() :].strip()
-
+    if len(command_text) > 100:
+        large_text_match = re.search(r'(/createquiz[^\n]+)(.+)', command_text, re.DOTALL)
+        if large_text_match:
+            large_text = large_text_match.group(2).strip()
+            
             await safe_send_message(
                 context.bot,
                 update.effective_chat.id,
@@ -57,7 +93,7 @@ async def create_quiz(update: Update, context: CallbackContext):
                 group_chat_id = update.effective_chat.id
                 questions_raw = await generate_quiz(topic, num_questions, large_text)
                 await process_questions(
-                    update, context, topic, questions_raw, group_chat_id
+                    update, context, topic, questions_raw, group_chat_id, duration_days
                 )
                 return
             except Exception as e:
@@ -164,7 +200,7 @@ async def create_quiz(update: Update, context: CallbackContext):
             )
 
 
-async def process_questions(update, context, topic, questions_raw, group_chat_id):
+async def process_questions(update, context, topic, questions_raw, group_chat_id, duration_days=None):
     """Process multiple questions from raw text and save them as a quiz."""
 
     # Parse multiple questions
@@ -179,6 +215,11 @@ async def process_questions(update, context, topic, questions_raw, group_chat_id
         )
         return
 
+    # Calculate end time if duration was specified
+    end_time = None
+    if duration_days:
+        end_time = datetime.utcnow() + timedelta(days=duration_days)
+        
     # Persist quiz with multiple questions
     session = SessionLocal()
     try:
@@ -187,6 +228,7 @@ async def process_questions(update, context, topic, questions_raw, group_chat_id
             questions=questions_list,
             status=QuizStatus.ACTIVE,
             group_chat_id=group_chat_id,
+            end_time=end_time,  # Set the end time if specified
         )
         session.add(quiz)
         session.commit()
@@ -196,10 +238,12 @@ async def process_questions(update, context, topic, questions_raw, group_chat_id
 
     # Notify group and DM creator for contract setup
     num_questions = len(questions_list)
+    duration_info = f" (Active for {duration_days} days)" if duration_days else ""
+    
     await safe_send_message(
         context.bot,
         update.effective_chat.id,
-        f"Quiz created with ID: {quiz_id}! {num_questions} question(s) about {topic}.\n"
+        f"Quiz created with ID: {quiz_id}! {num_questions} question(s) about {topic}{duration_info}.\n"
         f"Check your DMs to set up the reward contract.",
     )
 
@@ -209,6 +253,81 @@ async def process_questions(update, context, topic, questions_raw, group_chat_id
         update.effective_user.id,
         "Please specify the reward structure in this private chat (e.g., '2 Near for 1st, 1 Near for 2nd').",
     )
+    
+    # If quiz has an end time, schedule auto distribution task
+    if end_time:
+        # Convert to seconds from now
+        seconds_until_end = (end_time - datetime.utcnow()).total_seconds()
+        if seconds_until_end > 0:
+            # Schedule auto distribution task
+            context.application.create_task(
+                schedule_auto_distribution(context.bot, quiz_id, seconds_until_end)
+            )
+            logger.info(f"Scheduled auto distribution for quiz {quiz_id} in {seconds_until_end} seconds")
+
+
+async def schedule_auto_distribution(bot, quiz_id, delay_seconds):
+    """Schedule automatic reward distribution after the quiz ends."""
+    try:
+        # Wait until the quiz deadline
+        await asyncio.sleep(delay_seconds)
+        
+        # Get the quiz from database
+        session = SessionLocal()
+        try:
+            quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
+            if not quiz:
+                logger.error(f"Quiz {quiz_id} not found for auto distribution")
+                return
+                
+            # Skip if quiz is not in ACTIVE state
+            if quiz.status != QuizStatus.ACTIVE:
+                logger.info(f"Quiz {quiz_id} is not in ACTIVE state, skipping auto distribution")
+                return
+                
+            # Get group chat ID for notification
+            group_chat_id = quiz.group_chat_id
+            topic = quiz.topic
+        finally:
+            session.close()
+        
+        logger.info(f"Quiz {quiz_id} deadline reached, attempting auto distribution")
+        
+        # Try to get blockchain monitor from the application
+        from telegram.ext import Application
+        
+        # Note: This assumes there's only one Application instance in your system
+        application = bot._application
+        
+        # Get the blockchain monitor from the application
+        blockchain_monitor = getattr(application, "blockchain_monitor", None)
+        
+        if not blockchain_monitor:
+            logger.error(f"Cannot perform auto distribution for quiz {quiz_id}: blockchain monitor not available")
+            if group_chat_id:
+                await bot.send_message(
+                    chat_id=group_chat_id,
+                    text=f"⚠️ Quiz '{topic}' has ended but automatic reward distribution failed. Please use /distributerewards {quiz_id} to distribute rewards manually."
+                )
+            return
+            
+        # Perform reward distribution
+        success = await blockchain_monitor.distribute_rewards(quiz_id)
+        
+        if success and group_chat_id:
+            await bot.send_message(
+                chat_id=group_chat_id,
+                text=f"🏆 Quiz '{topic}' has ended and rewards have been automatically distributed to winners!"
+            )
+        elif not success and group_chat_id:
+            await bot.send_message(
+                chat_id=group_chat_id,
+                text=f"⚠️ Quiz '{topic}' has ended but automatic reward distribution failed. Please use /distributerewards {quiz_id} to distribute rewards manually."
+            )
+            
+    except Exception as e:
+        logger.error(f"Error in auto distribution for quiz {quiz_id}: {e}")
+        traceback.print_exc()
 
 
 def parse_multiple_questions(raw_questions):
