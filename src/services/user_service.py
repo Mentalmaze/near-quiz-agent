@@ -37,7 +37,9 @@ async def handle_wallet_address(update: Update, context: CallbackContext):
 
     try:
         # Basic validation
-        if not wallet_address.endswith(".near") and not wallet_address.endswith(".testnet"):
+        if not wallet_address.endswith(".near") and not wallet_address.endswith(
+            ".testnet"
+        ):
             await safe_send_message(
                 context.bot,
                 update.effective_chat.id,
@@ -58,7 +60,7 @@ async def handle_wallet_address(update: Update, context: CallbackContext):
             session.commit()
         finally:
             session.close()
-        
+
         # Clear awaiting state
         if "awaiting" in context.user_data:
             del context.user_data["awaiting"]
@@ -69,7 +71,7 @@ async def handle_wallet_address(update: Update, context: CallbackContext):
             update.effective_chat.id,
             f"Wallet {wallet_address} linked successfully! You're ready to play quizzes.",
         )
-            
+
     except Exception as e:
         logger.error(f"Error handling wallet address: {e}", exc_info=True)
         await safe_send_message(
