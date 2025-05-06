@@ -171,7 +171,7 @@ class TelegramBot:
 
         # Handle confirmation callbacks globally to catch any that might be missed by the conversation handler
         self.app.add_handler(CallbackQueryHandler(confirm_choice, pattern="^(yes|no)$"))
-        
+
         # THEN register other command handlers
         logger.info("Registering command handlers")
         self.app.add_handler(CommandHandler("linkwallet", link_wallet_handler))

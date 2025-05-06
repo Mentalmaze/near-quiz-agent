@@ -127,7 +127,9 @@ async def context_choice(update, context):
     )
     # Set the expectation that if user doesn't click a button, they might type a duration
     context.user_data["awaiting_duration_input"] = True
-    logger.info(f"Showing duration options to user {update.effective_user.id} after context_choice, set awaiting_duration_input=True")
+    logger.info(
+        f"Showing duration options to user {update.effective_user.id} after context_choice, set awaiting_duration_input=True"
+    )
     return DURATION_CHOICE
 
 
@@ -144,7 +146,9 @@ async def context_input(update, context):
     )
     # Set the expectation that if user doesn't click a button, they might type a duration
     context.user_data["awaiting_duration_input"] = True
-    logger.info(f"Showing duration options to user {update.effective_user.id} after context_input, set awaiting_duration_input=True")
+    logger.info(
+        f"Showing duration options to user {update.effective_user.id} after context_input, set awaiting_duration_input=True"
+    )
     return DURATION_CHOICE
 
 

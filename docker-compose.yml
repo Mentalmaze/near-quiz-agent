@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  mental-maze:
+    build: .
+    container_name: mental-maze-app
+    restart: always
+    env_file: .env
+    volumes:
+      - ./mental_maze.db:/app/mental_maze.db
+    ports:
+      - "8080:8080"  # Add port mapping if your app exposes any port
+
+networks:
+  default:
+    driver: bridge
