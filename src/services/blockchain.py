@@ -14,6 +14,7 @@ from py_near.account import Account
 # Import py-near components
 # from pynear.account import Account
 from py_near.dapps.core import NEAR
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -374,136 +375,88 @@ class BlockchainMonitor:
     async def verify_transaction_by_hash(self, tx_hash: str, quiz_id: str) -> bool:
         """
         Verify a transaction by its hash to confirm a deposit was made.
-
-        Args:
-            tx_hash: The transaction hash to verify
-            quiz_id: The quiz ID the deposit is for
-
-        Returns:
-            bool: True if the transaction is valid and has sufficient funds, False otherwise
+        Uses direct JSON-RPC `tx` endpoint to fetch the transaction.
         """
         if not self.near_account:
             logger.error("Cannot verify transaction - NEAR account not initialized")
             return False
 
+        # open session and fetch quiz
+        session = SessionLocal()
         try:
-            # Open a new session for this operation
-            session = SessionLocal()
-            try:
-                # Get quiz data
-                quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
-                if not quiz:
-                    logger.error(f"Quiz {quiz_id} not found")
+            quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
+            if not quiz or quiz.status != QuizStatus.FUNDING:
+                return False
+            deposit_address = quiz.deposit_address
+            required_amount = (
+                sum(int(v) for v in quiz.reward_schedule.values())
+                if quiz.reward_schedule
+                else 0
+            )
+        finally:
+            session.close()
+
+        try:
+            # call NEAR JSON-RPC tx method
+            payload = {
+                "jsonrpc": "2.0",
+                "id": "verify",
+                "method": "tx",
+                "params": [tx_hash, deposit_address],
+            }
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(Config.NEAR_RPC_ENDPOINT, json=payload)
+            data = resp.json()
+            result = data.get("result")
+            if not result or "status" not in result:
+                logger.warning(f"RPC returned no result or status for tx {tx_hash}")
+                return False
+
+            # check success
+            status = result["status"]
+            if isinstance(status, dict):
+                if "SuccessValue" not in status and "success_value" not in status:
                     return False
+            elif isinstance(status, str) and "SuccessValue" not in status:
+                return False
 
-                if quiz.status != QuizStatus.FUNDING:
-                    logger.info(f"Quiz {quiz_id} is not in FUNDING state")
-                    return False
+            # validate receiver
+            tx = result.get("transaction", {})
+            if tx.get("receiver_id") != deposit_address:
+                return False
 
-                deposit_address = quiz.deposit_address
-                required_amount = (
-                    sum(int(value) for value in quiz.reward_schedule.values())
-                    if quiz.reward_schedule
-                    else 0
-                )
+            # sum transfer actions
+            actions = tx.get("actions", [])
+            total_yocto = 0
+            for action in actions:
+                if "Transfer" in action:
+                    total_yocto += int(action["Transfer"].get("deposit", 0))
 
-                # Use NEAR RPC to verify the transaction
+            if total_yocto >= required_amount * NEAR:
+                # mark active and announce
+                session = SessionLocal()
                 try:
-                    # Get transaction status to verify it exists and is successful
-                    tx_info = await self.near_account.provider.get_transaction(tx_hash)
-
-                    # Check if transaction exists and was successful
-                    if not tx_info or "status" not in tx_info:
-                        logger.warning(
-                            f"Transaction {tx_hash} not found or status missing"
-                        )
-                        return False
-
-                    # Check if the transaction is a success
-                    if "SuccessValue" not in str(tx_info["status"]):
-                        logger.warning(f"Transaction {tx_hash} was not successful")
-                        return False
-
-                    # Check if this is a transfer transaction to our deposit address
-                    if (
-                        "transaction" not in tx_info
-                        or "receiver_id" not in tx_info["transaction"]
-                    ):
-                        logger.warning(f"Transaction {tx_hash} has invalid format")
-                        return False
-
-                    # Verify the receiver is our deposit address
-                    if tx_info["transaction"]["receiver_id"] != deposit_address:
-                        logger.warning(
-                            f"Transaction receiver {tx_info['transaction']['receiver_id']} does not match deposit address {deposit_address}"
-                        )
-                        return False
-
-                    # Check for amount in the transaction
-                    actions = tx_info["transaction"].get("actions", [])
-                    total_amount = 0
-
-                    for action in actions:
-                        if "Transfer" in action:
-                            transfer_amount = int(
-                                action["Transfer"].get("deposit", "0")
-                            )
-                            total_amount += transfer_amount
-
-                    # Convert to NEAR for comparison (1 NEAR = 10^24 yoctoNEAR)
-                    total_amount_near = total_amount / NEAR
-                    logger.info(
-                        f"Found transfer of {total_amount_near} NEAR in transaction {tx_hash}"
+                    quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
+                    quiz.status = QuizStatus.ACTIVE
+                    session.commit()
+                finally:
+                    session.close()
+                # send announcement
+                topic = quiz.topic
+                group_id = quiz.group_chat_id
+                if group_id:
+                    await self.bot.send_message(
+                        chat_id=group_id,
+                        text=(
+                            f"📣 New quiz '{topic}' is now active! 🎯\n"
+                            f"Total rewards: {required_amount} NEAR\n"
+                            f"Type /playquiz to participate!"
+                        ),
                     )
-
-                    # Check if the transferred amount is sufficient
-                    if total_amount >= required_amount * NEAR:
-                        # Update quiz to ACTIVE and commit immediately
-                        quiz.status = QuizStatus.ACTIVE
-                        total_reward = required_amount
-                        group_chat_id = quiz.group_chat_id
-                        topic = quiz.topic
-
-                        session.commit()
-
-                        # Announce the quiz is active in the original group chat
-                        try:
-                            if group_chat_id:
-                                # Use longer timeout for the announcement
-                                async with asyncio.timeout(10):  # 10 second timeout
-                                    await self.bot.send_message(
-                                        chat_id=group_chat_id,
-                                        text=f"📣 New quiz '{topic}' is now active! 🎯\n"
-                                        f"Total rewards: {total_reward} NEAR\n"
-                                        f"Type /playquiz to participate!",
-                                    )
-                                    logger.info(
-                                        f"Quiz {quiz_id} activated with {total_reward} NEAR via transaction {tx_hash}"
-                                    )
-                        except asyncio.TimeoutError:
-                            logger.error(f"Failed to announce active quiz: Timed out")
-                        except Exception as e:
-                            logger.error(f"Failed to announce active quiz: {e}")
-                            traceback.print_exc()
-
-                        return True
-                    else:
-                        logger.warning(
-                            f"Insufficient funds in transaction {tx_hash}: {total_amount_near}/{required_amount} NEAR"
-                        )
-                        return False
-
-                except Exception as e:
-                    logger.error(f"Error verifying transaction {tx_hash}: {e}")
-                    traceback.print_exc()
-                    return False
-
-            finally:
-                session.close()
-
+                return True
+            return False
         except Exception as e:
-            logger.error(f"Error during transaction verification: {e}")
-            traceback.print_exc()
+            logger.error(f"Error verifying transaction {tx_hash}: {e}", exc_info=True)
             return False
 
 
