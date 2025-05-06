@@ -125,6 +125,9 @@ async def context_choice(update, context):
         "How long should the quiz be open? e.g. '5 minutes', or skip.",
         reply_markup=InlineKeyboardMarkup(buttons),
     )
+    # Set the expectation that if user doesn't click a button, they might type a duration
+    context.user_data["awaiting_duration_input"] = True
+    logger.info(f"Showing duration options to user {update.effective_user.id} after context_choice, set awaiting_duration_input=True")
     return DURATION_CHOICE
 
 
@@ -139,6 +142,9 @@ async def context_input(update, context):
         "How long should the quiz be open? e.g. '5 minutes', or skip.",
         reply_markup=InlineKeyboardMarkup(buttons),
     )
+    # Set the expectation that if user doesn't click a button, they might type a duration
+    context.user_data["awaiting_duration_input"] = True
+    logger.info(f"Showing duration options to user {update.effective_user.id} after context_input, set awaiting_duration_input=True")
     return DURATION_CHOICE
 
 
@@ -146,16 +152,26 @@ async def duration_choice(update, context):
     choice = update.callback_query.data
     await update.callback_query.answer()
     logger.info(f"duration_choice: User {update.effective_user.id} selected {choice}")
-    
+
     if choice == "set_duration":
+        # Set a special flag to identify duration input messages
+        context.user_data["awaiting_duration_input"] = True
+        logger.info(
+            f"Setting awaiting_duration_input flag for user {update.effective_user.id}"
+        )
+
         await update.callback_query.message.reply_text(
             "Send duration, e.g. '5 minutes' or '2 hours'."
         )
-        logger.info(f"duration_choice: Returning DURATION_INPUT state for user {update.effective_user.id}")
+        logger.info(
+            f"duration_choice: Returning DURATION_INPUT state for user {update.effective_user.id}"
+        )
         return DURATION_INPUT
     # skip
     context.user_data["duration_seconds"] = None
-    logger.info(f"duration_choice: User {update.effective_user.id} skipped duration, going to confirm_prompt")
+    logger.info(
+        f"duration_choice: User {update.effective_user.id} skipped duration, going to confirm_prompt"
+    )
     # preview
     return await confirm_prompt(update, context)
 
@@ -187,16 +203,24 @@ async def duration_input(update, context):
             val = int(m.group(1))
             secs = val * 60
             context.user_data["duration_seconds"] = secs
-            logger.info(f"Flexibly parsed duration: {secs} seconds from '{message_text}'")
+            logger.info(
+                f"Flexibly parsed duration: {secs} seconds from '{message_text}'"
+            )
         elif m and "hour" in txt.lower():
             val = int(m.group(1))
             secs = val * 3600
             context.user_data["duration_seconds"] = secs
-            logger.info(f"Flexibly parsed duration: {secs} seconds from '{message_text}'")
+            logger.info(
+                f"Flexibly parsed duration: {secs} seconds from '{message_text}'"
+            )
         else:
             context.user_data["duration_seconds"] = 300  # Default to 5 minutes
-            logger.info(f"Could not parse duration from '{message_text}'. Using default: 300 seconds")
-            await update.message.reply_text("I couldn't understand that format. Using 5 minutes by default.")
+            logger.info(
+                f"Could not parse duration from '{message_text}'. Using default: 300 seconds"
+            )
+            await update.message.reply_text(
+                "I couldn't understand that format. Using 5 minutes by default."
+            )
     return await confirm_prompt(update, context)
 
 
@@ -292,15 +316,73 @@ async def private_message_handler(update: Update, context: CallbackContext):
         f"User_data for {user_id} in private_message_handler: {context.user_data}"
     )
 
-    if context.user_data.get("awaiting_reward_quiz_id"):
+    # Check for reward structure handling
+    if context.user_data.get("awaiting") == "reward_structure" or context.user_data.get(
+        "awaiting_reward_quiz_id"
+    ):
         logger.info(
-            f"User {user_id} has 'awaiting_reward_quiz_id': {context.user_data['awaiting_reward_quiz_id']}. Passing to handle_reward_structure."
+            f"User {user_id} is awaiting reward structure input. Passing to handle_reward_structure."
         )
         await handle_reward_structure(update, context)
         return
 
+    # Check for duration input flag
+    if context.user_data.get("awaiting_duration_input"):
+        logger.info(
+            f"User {user_id} is awaiting duration input. Processing duration: '{message_text}'"
+        )
+        # Clear the flag
+        context.user_data["awaiting_duration_input"] = False
+
+        # Parse duration input
+        txt = message_text.strip().lower()
+        import re
+
+        m = re.match(r"(\d+)\s*(minute|hour|min)s?", txt)
+        if m:
+            val = int(m.group(1))
+            unit = m.group(2)
+            secs = val * (3600 if unit.startswith("hour") else 60)
+            context.user_data["duration_seconds"] = secs
+            logger.info(f"Parsed duration: {secs} seconds from '{message_text}'")
+        else:
+            # Try a more flexible regex
+            m = re.search(r"(\d+)", txt)
+            if m:
+                # Default to minutes if no unit specified
+                val = int(m.group(1))
+                secs = val * 60
+                context.user_data["duration_seconds"] = secs
+                logger.info(
+                    f"Parsed basic duration: {secs} seconds from '{message_text}'"
+                )
+            else:
+                # Use default duration
+                context.user_data["duration_seconds"] = 300  # 5 minutes
+                logger.info(
+                    f"Using default duration of 300 seconds for '{message_text}'"
+                )
+
+        # Show confirmation prompt
+        topic = context.user_data["topic"]
+        n = context.user_data["num_questions"]
+        has_ctx = bool(context.user_data.get("context_text"))
+        dur = context.user_data["duration_seconds"]
+        text = f"Ready to generate a {n}-question quiz on '{topic}'"
+        text += " based on your text" if has_ctx else ""
+        text += f", open for {dur//60} minutes"
+        text += ". Generate now?"
+        buttons = [
+            [InlineKeyboardButton("Yes", callback_data="yes")],
+            [InlineKeyboardButton("No", callback_data="no")],
+        ]
+        await update.message.reply_text(
+            text, reply_markup=InlineKeyboardMarkup(buttons)
+        )
+        return
+
     logger.info(
-        f"Message from user {user_id} ('{message_text}') is NOT for reward structure (awaiting_reward_quiz_id not found or false). Checking ConversationHandler."
+        f"Message from user {user_id} ('{message_text}') is NOT for reward structure or duration input. Checking ConversationHandler."
     )
 
 

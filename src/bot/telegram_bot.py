@@ -164,11 +164,14 @@ class TelegramBot:
             name="quiz_creation",
             # Key conversation by user_id, not by chat_id, for group->DM flow
             per_chat=False,
-            # Persist conversation state across bot restarts (requires persistence setup)
-            # persistent=True, # Consider adding persistence later
+            # Better mapping strategy for conversation states
+            map_to_parent=True,
         )
         self.app.add_handler(conv)
 
+        # Handle confirmation callbacks globally to catch any that might be missed by the conversation handler
+        self.app.add_handler(CallbackQueryHandler(confirm_choice, pattern="^(yes|no)$"))
+        
         # THEN register other command handlers
         logger.info("Registering command handlers")
         self.app.add_handler(CommandHandler("linkwallet", link_wallet_handler))

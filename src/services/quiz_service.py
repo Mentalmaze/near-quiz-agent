@@ -332,7 +332,7 @@ async def process_questions(
         update.effective_user.id,
         "Please specify the reward structure in this private chat (e.g., '2 Near for 1st, 1 Near for 2nd').",
     )
-    
+
     # Set the awaiting flags correctly for both formats
     context.user_data["awaiting"] = "reward_structure"
     context.user_data["awaiting_reward_quiz_id"] = quiz_id
