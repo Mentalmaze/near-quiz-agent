@@ -81,8 +81,10 @@ class BlockchainMonitor:
                 "Failed to start blockchain monitor due to NEAR connection failure"
             )
             return
-            
-        logger.info("Blockchain monitor initialized - no automatic monitoring enabled, using manual verification only")
+
+        logger.info(
+            "Blockchain monitor initialized - no automatic monitoring enabled, using manual verification only"
+        )
         return
 
     async def stop_monitoring(self):

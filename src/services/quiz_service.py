@@ -864,7 +864,8 @@ async def handle_reward_structure(update: Update, context: ContextTypes.DEFAULT_
 
     # Inform creator privately about deposit with a new option to verify via transaction hash
     msg = f"Please deposit a total of {total} Near to this address to activate the quiz:\n{deposit_addr}\n\n"
-    msg += "After making your deposit, please send me the transaction hash to verify and activate the quiz immediately."
+    msg += "⚠️ IMPORTANT: After making your deposit, you MUST send me the transaction hash to activate the quiz. The quiz will NOT be activated automatically.\n\n"
+    msg += "Your transaction hash will look like 'FnuPC7YmQBJ1Qr22qjRT3XX8Vr8NbJAuWGVG5JyXQRjS' and can be found in your wallet's transaction history."
 
     await safe_send_message(context.bot, update.effective_chat.id, msg)
 
@@ -882,8 +883,8 @@ async def handle_reward_structure(update: Update, context: ContextTypes.DEFAULT_
                     original_group_chat_id,
                     text=(
                         f"Quiz '{quiz_topic}' is now funding.\n"
-                        f"Creator must deposit {total} Near to activate it.\n"
-                        f"Once active, type /playquiz to join!"
+                        f"Creator must deposit {total} Near and verify the transaction to activate it.\n"
+                        f"Once active, you'll be notified and can type /playquiz to join!"
                     ),
                 )
     except asyncio.TimeoutError:
