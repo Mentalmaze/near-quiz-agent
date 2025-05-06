@@ -776,14 +776,21 @@ async def handle_reward_structure(update: Update, context: ContextTypes.DEFAULT_
         return
 
     # Skip if we're not awaiting a reward structure
-    if context.user_data.get("awaiting") in ("wallet_address", "signature"):
-        # This is for wallet linking flow, not reward structure
+    if context.user_data.get("awaiting") in (
+        "wallet_address",
+        "signature",
+        "transaction_hash",
+    ):
+        # This is for wallet linking flow or transaction hash verification
         from services.user_service import handle_wallet_address, handle_signature
+        from services.blockchain import BlockchainMonitor
 
         if context.user_data.get("awaiting") == "wallet_address":
             await handle_wallet_address(update, context)
         elif context.user_data.get("awaiting") == "signature":
             await handle_signature(update, context)
+        elif context.user_data.get("awaiting") == "transaction_hash":
+            await handle_transaction_hash(update, context)
         return
 
     text = update.message.text
@@ -838,6 +845,7 @@ async def handle_reward_structure(update: Update, context: ContextTypes.DEFAULT_
         # Store these values for use after session is closed
         quiz_topic = quiz.topic
         original_group_chat_id = quiz.group_chat_id
+        quiz_id = quiz.id  # Store quiz ID for later use
 
         session.commit()
     except Exception as e:
@@ -854,12 +862,15 @@ async def handle_reward_structure(update: Update, context: ContextTypes.DEFAULT_
     finally:
         session.close()
 
-    # Inform creator privately
-    await safe_send_message(
-        context.bot,
-        update.effective_chat.id,
-        f"Please deposit a total of {total} Near to this address to activate the quiz:\n{deposit_addr}",
-    )
+    # Inform creator privately about deposit with a new option to verify via transaction hash
+    msg = f"Please deposit a total of {total} Near to this address to activate the quiz:\n{deposit_addr}\n\n"
+    msg += "After making your deposit, please send me the transaction hash to verify and activate the quiz immediately."
+
+    await safe_send_message(context.bot, update.effective_chat.id, msg)
+
+    # Set context to await transaction hash
+    context.user_data["awaiting"] = "transaction_hash"
+    context.user_data["quiz_id"] = quiz_id
 
     # Announce in group chat
     try:
@@ -882,6 +893,71 @@ async def handle_reward_structure(update: Update, context: ContextTypes.DEFAULT_
         import traceback
 
         traceback.print_exc()
+
+
+async def handle_transaction_hash(update: Update, context: CallbackContext):
+    """Process transaction hash verification from quiz creator."""
+    tx_hash = update.message.text.strip()
+    quiz_id = context.user_data.get("quiz_id")
+
+    if not quiz_id:
+        await safe_send_message(
+            context.bot,
+            update.effective_chat.id,
+            "Sorry, I couldn't determine which quiz you're trying to verify. Please try setting up the reward structure again.",
+        )
+        # Clear awaiting state
+        if "awaiting" in context.user_data:
+            del context.user_data["awaiting"]
+        return
+
+    # Process message - show typing action while verifying
+    await context.bot.send_chat_action(
+        chat_id=update.effective_chat.id, action="typing"
+    )
+
+    # Get blockchain monitor from application
+    app = context.application
+    blockchain_monitor = getattr(app, "blockchain_monitor", None)
+
+    if not blockchain_monitor:
+        # Try to access it from another location in context
+        blockchain_monitor = getattr(app, "_blockchain_monitor", None)
+
+    if not blockchain_monitor:
+        await safe_send_message(
+            context.bot,
+            update.effective_chat.id,
+            "❌ Sorry, I couldn't access the blockchain monitor to verify your transaction. Please wait for automatic verification or contact an administrator.",
+        )
+        # Clear awaiting state
+        if "awaiting" in context.user_data:
+            del context.user_data["awaiting"]
+        return
+
+    # Verify the transaction
+    success = await blockchain_monitor.verify_transaction_by_hash(tx_hash, quiz_id)
+
+    if success:
+        await safe_send_message(
+            context.bot,
+            update.effective_chat.id,
+            "✅ Transaction verified successfully! Your quiz is now active and ready to play.",
+        )
+    else:
+        await safe_send_message(
+            context.bot,
+            update.effective_chat.id,
+            "❌ Couldn't verify your transaction. Please ensure:\n"
+            "1. The transaction hash is correct\n"
+            "2. The transaction was sent to the correct address\n"
+            "3. The transaction amount is sufficient for the rewards\n\n"
+            "Alternatively, wait for automatic verification (may take a few minutes).",
+        )
+
+    # Clear awaiting state
+    if "awaiting" in context.user_data:
+        del context.user_data["awaiting"]
 
 
 async def get_winners(update: Update, context: CallbackContext):
