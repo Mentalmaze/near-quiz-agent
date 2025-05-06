@@ -21,7 +21,9 @@ class Config:
     )
     NEAR_WALLET_PRIVATE_KEY = os.getenv("NEAR_WALLET_PRIVATE_KEY")
     NEAR_WALLET_ADDRESS = os.getenv("NEAR_WALLET_ADDRESS")
-
+    NEAR_RPC_ENDPOINT_TRANS = os.getenv(
+        "NEAR_RPC_ENDPOINT", "https://allthatnode.com/protocol/near.dsrv"
+    )
     # Database Configuration
     # In production, use PostgreSQL; in development, fallback to SQLite
     DATABASE_URL = os.getenv(

@@ -387,7 +387,7 @@ class BlockchainMonitor:
         """Make an RPC request with retries and proper error handling"""
         timeout = httpx.Timeout(30.0, connect=10.0)
         async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(Config.NEAR_RPC_ENDPOINT, json=payload)
+            resp = await client.post(Config.NEAR_RPC_ENDPOINT_TRANS, json=payload)
             resp.raise_for_status()
             return resp.json()
 
@@ -417,7 +417,7 @@ class BlockchainMonitor:
             payload = {
                 "jsonrpc": "2.0",
                 "id": "dontcare",
-                "method": "tx",
+                "method": "EXPERIMENTAL_tx_status",
                 "params": {
                     "tx_hash": tx_hash,
                     "sender_account_id": sender_account_id,
@@ -426,7 +426,7 @@ class BlockchainMonitor:
             }
 
             try:
-                resp = await client.post(Config.NEAR_RPC_ENDPOINT, json=payload)
+                resp = await client.post(Config.NEAR_RPC_ENDPOINT_TRANS, json=payload)
                 resp.raise_for_status()
                 result = resp.json()
 
@@ -481,8 +481,12 @@ class BlockchainMonitor:
             payload = {
                 "jsonrpc": "2.0",
                 "id": "verify",
-                "method": "tx",
-                "params": [tx_hash, quiz_data["deposit_address"], "FINAL"],
+                "method": "EXPERIMENTAL_tx_status",
+                "params": {
+                    "tx_hash": tx_hash,
+                    "sender_account_id": quiz_data["deposit_address"],
+                    "wait_until": "FINAL",
+                },
             }
 
             try:
