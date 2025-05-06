@@ -338,35 +338,33 @@ async def process_questions(
         if seconds_until_end > 0:
             # Schedule auto distribution task
             context.application.create_task(
-                schedule_auto_distribution(context.bot, quiz_id, seconds_until_end)
+                schedule_auto_distribution(
+                    context.application, quiz_id, seconds_until_end
+                )
             )
             logger.info(
                 f"Scheduled auto distribution for quiz {quiz_id} in {seconds_until_end} seconds"
             )
 
 
-async def schedule_auto_distribution(bot, quiz_id, delay_seconds):
+async def schedule_auto_distribution(application, quiz_id, delay_seconds):
     """Schedule automatic reward distribution after the quiz ends."""
     try:
         # Wait until the quiz deadline
         await asyncio.sleep(delay_seconds)
 
-        # Get the quiz from database
+        # Load quiz state from database
         session = SessionLocal()
         try:
             quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
             if not quiz:
                 logger.error(f"Quiz {quiz_id} not found for auto distribution")
                 return
-
-            # Skip if quiz is not in ACTIVE state
             if quiz.status != QuizStatus.ACTIVE:
                 logger.info(
                     f"Quiz {quiz_id} is not in ACTIVE state, skipping auto distribution"
                 )
                 return
-
-            # Get group chat ID for notification
             group_chat_id = quiz.group_chat_id
             topic = quiz.topic
         finally:
@@ -374,63 +372,35 @@ async def schedule_auto_distribution(bot, quiz_id, delay_seconds):
 
         logger.info(f"Quiz {quiz_id} deadline reached, attempting auto distribution")
 
-        # Try to get blockchain monitor from the application
-        # The previous code was trying to access bot._application which doesn't exist
-        # Instead, get the application from context.application in the global scope
-
-        # Import the required modules
-        from telegram.ext import ApplicationBuilder
-        import inspect
-
-        # Find the application instance
-        blockchain_monitor = None
-
-        # Try different ways to access the blockchain monitor
-        # 1. Try to get it from bot directly
-        if hasattr(bot, "blockchain_monitor"):
-            blockchain_monitor = bot.blockchain_monitor
-        # 2. Try to get it from application
-        elif hasattr(bot, "application"):
-            if hasattr(bot.application, "blockchain_monitor"):
-                blockchain_monitor = bot.application.blockchain_monitor
-        # 3. Try to access via global scope - this is a fallback method
-        else:
-            # Look for the blockchain monitor in the main module
-            import sys
-
-            for module_name, module in sys.modules.items():
-                if (
-                    hasattr(module, "blockchain_monitor")
-                    and module.__name__ != __name__
-                ):
-                    blockchain_monitor = module.blockchain_monitor
-                    break
-
+        # Retrieve blockchain monitor from the application
+        blockchain_monitor = getattr(application, "blockchain_monitor", None)
         if not blockchain_monitor:
             logger.error(
                 f"Cannot perform auto distribution for quiz {quiz_id}: blockchain monitor not available"
             )
             if group_chat_id:
-                await bot.send_message(
+                await application.bot.send_message(
                     chat_id=group_chat_id,
-                    text=f"⚠️ Quiz '{topic}' has ended but automatic reward distribution failed. Please use /distributerewards {quiz_id} to distribute rewards manually.",
+                    text=(
+                        f"⚠️ Quiz '{topic}' has ended but automatic reward distribution failed. "
+                        f"Please use /distributerewards {quiz_id} to distribute rewards manually."
+                    ),
                 )
             return
 
         # Perform reward distribution
         success = await blockchain_monitor.distribute_rewards(quiz_id)
 
-        if success and group_chat_id:
-            await bot.send_message(
-                chat_id=group_chat_id,
-                text=f"🏆 Quiz '{topic}' has ended and rewards have been automatically distributed to winners!",
-            )
-        elif not success and group_chat_id:
-            await bot.send_message(
-                chat_id=group_chat_id,
-                text=f"⚠️ Quiz '{topic}' has ended but automatic reward distribution failed. Please use /distributerewards {quiz_id} to distribute rewards manually.",
-            )
-
+        # Notify group chat of result
+        if group_chat_id:
+            if success:
+                text = f"🏆 Quiz '{topic}' has ended and rewards have been automatically distributed to winners!"
+            else:
+                text = (
+                    f"⚠️ Quiz '{topic}' has ended but automatic reward distribution failed. "
+                    f"Please use /distributerewards {quiz_id} to distribute rewards manually."
+                )
+            await application.bot.send_message(chat_id=group_chat_id, text=text)
     except Exception as e:
         logger.error(f"Error in auto distribution for quiz {quiz_id}: {e}")
         traceback.print_exc()
