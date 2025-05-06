@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Enum, JSON, DateTime, BigInteger, Integer
+from sqlalchemy import Column, String, Enum, JSON, DateTime, BigInteger, Boolean
 from sqlalchemy.ext.declarative import declarative_base
 import enum
 import uuid
@@ -53,9 +53,10 @@ class QuizAnswer(Base):
     def compute_quiz_winners(session, quiz_id):
         """Compute winners for a quiz based on correct answers and timing"""
         # Get all correct answers for this quiz
+        # Fix: Use string 'True' instead of boolean True for comparison
         correct_answers = (
             session.query(QuizAnswer)
-            .filter(QuizAnswer.quiz_id == quiz_id, QuizAnswer.is_correct == True)
+            .filter(QuizAnswer.quiz_id == quiz_id, QuizAnswer.is_correct == 'True')
             .order_by(QuizAnswer.answered_at)
             .all()
         )

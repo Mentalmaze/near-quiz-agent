@@ -662,7 +662,7 @@ async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
             user_id=user_id,
             username=username,
             answer=answer,
-            is_correct=is_correct,
+            is_correct=str(is_correct),  # Store as string 'True' or 'False', not boolean
         )
         session.add(quiz_answer)
         session.commit()
@@ -983,3 +983,4 @@ async def distribute_quiz_rewards(update: Update, context: CallbackContext):
             await processing_msg.delete()
         except:
             pass
+```
