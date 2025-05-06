@@ -6,6 +6,7 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
+    ConversationHandler,
 )
 from telegram.ext import MessageHandler, filters
 from telegram.error import TimedOut, NetworkError, RetryAfter, TelegramError, BadRequest
@@ -77,7 +78,22 @@ class TelegramBot:
     def register_handlers(self):
         # Import handlers here to avoid circular dependencies
         from bot.handlers import (
-            create_quiz_handler,
+            start_createquiz_group,
+            topic_received,
+            size_received,
+            context_choice,
+            context_input,
+            duration_choice,
+            duration_input,
+            confirm_prompt,
+            confirm_choice,
+            TOPIC,
+            SIZE,
+            CONTEXT_CHOICE,
+            CONTEXT_INPUT,
+            DURATION_CHOICE,
+            DURATION_INPUT,
+            CONFIRM,
             link_wallet_handler,
             play_quiz_handler,
             quiz_answer_handler,
@@ -86,8 +102,52 @@ class TelegramBot:
             distribute_rewards_handler,
         )
 
-        # Register command handlers
-        self.app.add_handler(CommandHandler("createquiz", create_quiz_handler))
+        # Conversation for interactive quiz creation (in private DM)
+        conv = ConversationHandler(
+            entry_points=[CommandHandler("createquiz", start_createquiz_group)],
+            states={
+                TOPIC: [
+                    MessageHandler(
+                        filters.TEXT & filters.ChatType.PRIVATE, topic_received
+                    )
+                ],
+                SIZE: [
+                    MessageHandler(
+                        filters.TEXT & filters.ChatType.PRIVATE, size_received
+                    )
+                ],
+                CONTEXT_CHOICE: [
+                    CallbackQueryHandler(
+                        context_choice, pattern="^(paste|skip_context)$"
+                    )
+                ],
+                CONTEXT_INPUT: [
+                    MessageHandler(
+                        filters.TEXT & filters.ChatType.PRIVATE, context_input
+                    )
+                ],
+                DURATION_CHOICE: [
+                    CallbackQueryHandler(
+                        duration_choice, pattern="^(set_duration|skip_duration)$"
+                    )
+                ],
+                DURATION_INPUT: [
+                    MessageHandler(
+                        filters.TEXT & filters.ChatType.PRIVATE, duration_input
+                    )
+                ],
+                CONFIRM: [CallbackQueryHandler(confirm_choice, pattern="^(yes|no)$")],
+            },
+            fallbacks=[
+                CommandHandler(
+                    "cancel", lambda update, context: ConversationHandler.END
+                )
+            ],
+            allow_reentry=True,
+        )
+        self.app.add_handler(conv)
+
+        # Legacy single-command /createquiz removed in favor of interactive flow
         self.app.add_handler(CommandHandler("linkwallet", link_wallet_handler))
         self.app.add_handler(CommandHandler("playquiz", play_quiz_handler))
         self.app.add_handler(CommandHandler("winners", winners_handler))
@@ -113,7 +173,6 @@ class TelegramBot:
         """Initialize the blockchain monitor."""
         self.blockchain_monitor = await start_blockchain_monitor(self.app.bot)
 
-        
         self.app.blockchain_monitor = self.blockchain_monitor
 
     async def start(self):
