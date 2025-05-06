@@ -75,19 +75,15 @@ class BlockchainMonitor:
 
     async def start_monitoring(self):
         """Start the blockchain monitoring service."""
-        if self._running:
-            return
-
         # Initialize NEAR connection first
         if not await self.startup_near_account():
             logger.error(
                 "Failed to start blockchain monitor due to NEAR connection failure"
             )
             return
-
-        self._running = True
-        self._monitor_task = asyncio.create_task(self._monitor_loop())
-        logger.info("Blockchain monitor started")
+            
+        logger.info("Blockchain monitor initialized - no automatic monitoring enabled, using manual verification only")
+        return
 
     async def stop_monitoring(self):
         """Stop the blockchain monitoring service."""
@@ -102,6 +98,9 @@ class BlockchainMonitor:
             except asyncio.CancelledError:
                 pass
         logger.info("Blockchain monitor stopped")
+
+    # We're keeping the monitor_loop and _check_deposit methods for backwards compatibility
+    # but they won't be automatically used anymore
 
     async def _monitor_loop(self):
         """Continuously monitor for deposits to quiz addresses."""
