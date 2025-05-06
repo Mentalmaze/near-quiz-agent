@@ -381,18 +381,24 @@ class BlockchainMonitor:
             logger.error("Cannot verify transaction - NEAR account not initialized")
             return False
 
-        # open session and fetch quiz
+        # open session and fetch quiz with required attributes
+        quiz_data = {}
         session = SessionLocal()
         try:
             quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
             if not quiz or quiz.status != QuizStatus.FUNDING:
                 return False
-            deposit_address = quiz.deposit_address
-            required_amount = (
-                sum(int(v) for v in quiz.reward_schedule.values())
-                if quiz.reward_schedule
-                else 0
-            )
+            # Store all required attributes while session is open
+            quiz_data = {
+                "deposit_address": quiz.deposit_address,
+                "required_amount": (
+                    sum(int(v) for v in quiz.reward_schedule.values())
+                    if quiz.reward_schedule
+                    else 0
+                ),
+                "topic": quiz.topic,
+                "group_chat_id": quiz.group_chat_id,
+            }
         finally:
             session.close()
 
@@ -402,7 +408,7 @@ class BlockchainMonitor:
                 "jsonrpc": "2.0",
                 "id": "verify",
                 "method": "tx",
-                "params": [tx_hash, deposit_address],
+                "params": [tx_hash, quiz_data["deposit_address"]],
             }
             async with httpx.AsyncClient() as client:
                 resp = await client.post(Config.NEAR_RPC_ENDPOINT, json=payload)
@@ -422,7 +428,7 @@ class BlockchainMonitor:
 
             # validate receiver
             tx = result.get("transaction", {})
-            if tx.get("receiver_id") != deposit_address:
+            if tx.get("receiver_id") != quiz_data["deposit_address"]:
                 return False
 
             # sum transfer actions
@@ -432,8 +438,8 @@ class BlockchainMonitor:
                 if "Transfer" in action:
                     total_yocto += int(action["Transfer"].get("deposit", 0))
 
-            if total_yocto >= required_amount * NEAR:
-                # mark active and announce
+            if total_yocto >= quiz_data["required_amount"] * NEAR:
+                # mark active and announce in new session
                 session = SessionLocal()
                 try:
                     quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
@@ -441,15 +447,14 @@ class BlockchainMonitor:
                     session.commit()
                 finally:
                     session.close()
-                # send announcement
-                topic = quiz.topic
-                group_id = quiz.group_chat_id
-                if group_id:
+
+                # send announcement using stored quiz data
+                if quiz_data["group_chat_id"]:
                     await self.bot.send_message(
-                        chat_id=group_id,
+                        chat_id=quiz_data["group_chat_id"],
                         text=(
-                            f"📣 New quiz '{topic}' is now active! 🎯\n"
-                            f"Total rewards: {required_amount} NEAR\n"
+                            f"📣 New quiz '{quiz_data['topic']}' is now active! 🎯\n"
+                            f"Total rewards: {quiz_data['required_amount']} NEAR\n"
                             f"Type /playquiz to participate!"
                         ),
                     )
