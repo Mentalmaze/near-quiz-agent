@@ -7,7 +7,7 @@ from models.quiz import Quiz, QuizStatus
 from store.database import SessionLocal
 from utils.config import Config
 import traceback
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 from py_near.account import Account
 
@@ -15,6 +15,12 @@ from py_near.account import Account
 # from pynear.account import Account
 from py_near.dapps.core import NEAR
 import httpx
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -372,6 +378,75 @@ class BlockchainMonitor:
             if session:
                 session.close()
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        retry=retry_if_exception_type((httpx.TimeoutException, httpx.ReadTimeout)),
+    )
+    async def _make_rpc_request(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Make an RPC request with retries and proper error handling"""
+        timeout = httpx.Timeout(30.0, connect=10.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(Config.NEAR_RPC_ENDPOINT, json=payload)
+            resp.raise_for_status()
+            return resp.json()
+
+    @retry(
+        retry=retry_if_exception_type((httpx.ReadTimeout, httpx.ConnectTimeout)),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+    )
+    async def verify_transaction_by_hash(
+        self, tx_hash: str, sender_account_id: str
+    ) -> Dict[str, Any]:
+        """
+        Verify a transaction by its hash using NEAR RPC.
+        Implements retry logic for timeout errors.
+
+        Args:
+            tx_hash: The transaction hash to verify
+            sender_account_id: The sender's account ID
+
+        Returns:
+            Dict containing the transaction verification result
+
+        Raises:
+            httpx.TimeoutException: If all retry attempts fail
+        """
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            payload = {
+                "jsonrpc": "2.0",
+                "id": "dontcare",
+                "method": "tx",
+                "params": {
+                    "tx_hash": tx_hash,
+                    "sender_account_id": sender_account_id,
+                    "wait_until": "FINAL",
+                },
+            }
+
+            try:
+                resp = await client.post(Config.NEAR_RPC_ENDPOINT, json=payload)
+                resp.raise_for_status()
+                result = resp.json()
+
+                if "error" in result:
+                    error_name = result["error"].get("name")
+                    error_cause = result["error"].get("cause", {}).get("name")
+                    logger.error(f"RPC Error: {error_name} - {error_cause}")
+                    raise Exception(f"Transaction verification failed: {error_name}")
+
+                return result["result"]
+
+            except httpx.TimeoutException as e:
+                logger.warning(
+                    f"Timeout while verifying transaction {tx_hash}, retrying..."
+                )
+                raise
+            except Exception as e:
+                logger.error(f"Error verifying transaction {tx_hash}: {str(e)}")
+                raise
+
     async def verify_transaction_by_hash(self, tx_hash: str, quiz_id: str) -> bool:
         """
         Verify a transaction by its hash to confirm a deposit was made.
@@ -381,10 +456,11 @@ class BlockchainMonitor:
             logger.error("Cannot verify transaction - NEAR account not initialized")
             return False
 
-        # open session and fetch quiz with required attributes
+        # open session with retry logic
         quiz_data = {}
-        session = SessionLocal()
-        try:
+        from store.database import get_db
+
+        with get_db() as session:
             quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
             if not quiz or quiz.status != QuizStatus.FUNDING:
                 return False
@@ -399,8 +475,6 @@ class BlockchainMonitor:
                 "topic": quiz.topic,
                 "group_chat_id": quiz.group_chat_id,
             }
-        finally:
-            session.close()
 
         try:
             # call NEAR JSON-RPC tx method
@@ -408,17 +482,27 @@ class BlockchainMonitor:
                 "jsonrpc": "2.0",
                 "id": "verify",
                 "method": "tx",
-                "params": [tx_hash, quiz_data["deposit_address"]],
+                "params": [tx_hash, quiz_data["deposit_address"], "FINAL"],
             }
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(Config.NEAR_RPC_ENDPOINT, json=payload)
-            data = resp.json()
+
+            try:
+                data = await self._make_rpc_request(payload)
+            except (httpx.TimeoutException, httpx.ReadTimeout) as e:
+                logger.warning(
+                    f"Timeout while verifying transaction {tx_hash}. Error: {str(e)}"
+                )
+                return False
+            except httpx.HTTPError as e:
+                logger.error(
+                    f"HTTP error while verifying transaction {tx_hash}. Error: {str(e)}"
+                )
+                return False
+
             result = data.get("result")
             if not result or "status" not in result:
                 logger.warning(f"RPC returned no result or status for tx {tx_hash}")
                 return False
 
-            # check success
             status = result["status"]
             if isinstance(status, dict):
                 if "SuccessValue" not in status and "success_value" not in status:
@@ -426,12 +510,10 @@ class BlockchainMonitor:
             elif isinstance(status, str) and "SuccessValue" not in status:
                 return False
 
-            # validate receiver
             tx = result.get("transaction", {})
             if tx.get("receiver_id") != quiz_data["deposit_address"]:
                 return False
 
-            # sum transfer actions
             actions = tx.get("actions", [])
             total_yocto = 0
             for action in actions:
@@ -439,14 +521,11 @@ class BlockchainMonitor:
                     total_yocto += int(action["Transfer"].get("deposit", 0))
 
             if total_yocto >= quiz_data["required_amount"] * NEAR:
-                # mark active and announce in new session
-                session = SessionLocal()
-                try:
+                # mark active and announce in new session with retry logic
+                with get_db() as session:
                     quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
                     quiz.status = QuizStatus.ACTIVE
                     session.commit()
-                finally:
-                    session.close()
 
                 # send announcement using stored quiz data
                 if quiz_data["group_chat_id"]:

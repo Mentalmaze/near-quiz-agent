@@ -22,13 +22,13 @@ logger = logging.getLogger(__name__)
 async def main():
     """Start the bot and initialize necessary services."""
 
-    # Try to migrate schema if using PostgreSQL
-    if "postgresql" in Config.DATABASE_URL or "postgres" in Config.DATABASE_URL:
-        logger.info("Attempting to migrate database schema for PostgreSQL...")
-        migrate_schema()
+    # # Try to migrate schema if using PostgreSQL
+    # if "postgresql" in Config.DATABASE_URL or "postgres" in Config.DATABASE_URL:
+    #     logger.info("Attempting to migrate database schema for PostgreSQL...")
+    #     migrate_schema()
 
     # Initialize database tables if they don't exist
-    init_db()
+    # init_db()
 
     # Start telegram bot
     bot = TelegramBot(token=Config.TELEGRAM_TOKEN)

@@ -1,80 +1,139 @@
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.exc import OperationalError, DBAPIError
 from utils.config import Config
 from models.user import Base as UserBase
 from models.quiz import Base as QuizBase
 import logging
 import os
+import time
+from contextlib import contextmanager
+from typing import Generator
 
 logger = logging.getLogger(__name__)
 
-# Try to create the database engine with proper error handling
-try:
-    database_url = Config.DATABASE_URL
+# Maximum number of retries for database operations
+MAX_RETRIES = 3
+RETRY_DELAY = 1  # seconds
 
-    # Fix the postgres dialect issue - replace 'postgres:' with 'postgresql:'
-    if database_url and database_url.startswith("postgres:"):
-        database_url = database_url.replace("postgres:", "postgresql:", 1)
-        logger.info("Modified database URL from postgres: to postgresql: format")
 
-    # For better debugging
-    if database_url and ("postgresql" in database_url or "postgres" in database_url):
-        logger.info("Using PostgreSQL database")
-        try:
-            # For remote PostgreSQL connections, we need the psycopg2 driver
-            import psycopg2
+def create_db_engine():
+    """Create database engine with proper error handling and configuration."""
+    try:
+        database_url = Config.DATABASE_URL
 
-            logger.info("PostgreSQL driver (psycopg2) found")
-        except ImportError:
-            logger.error("PostgreSQL driver not found. Falling back to SQLite.")
-            database_url = "sqlite:///./mental_maze.db"
+        # Fix the postgres dialect issue - replace 'postgres:' with 'postgresql:'
+        if database_url and database_url.startswith("postgres:"):
+            database_url = database_url.replace("postgres:", "postgresql:", 1)
+            logger.info("Modified database URL from postgres: to postgresql: format")
 
-        # Additional logging for remote connections
-        if "@" in database_url:
-            # Extract host without exposing credentials
-            host_part = database_url.split("@")[1].split("/")[0]
-            logger.info(f"Connecting to remote PostgreSQL database at {host_part}")
-    else:
-        logger.info("Using SQLite database")
+        # For better debugging
+        if database_url and (
+            "postgresql" in database_url or "postgres" in database_url
+        ):
+            logger.info("Using PostgreSQL database")
+            try:
+                import psycopg2
 
-    # Create the engine with the configured URL
-    logger.info(f"Attempting database connection...")
+                logger.info("PostgreSQL driver (psycopg2) found")
+            except ImportError:
+                logger.error("PostgreSQL driver not found. Falling back to SQLite.")
+                database_url = "sqlite:///./mental_maze.db"
 
-    # For PostgreSQL, add connection pool settings for better handling of remote connections
-    engine_args = {}
-    if "postgresql" in database_url:
-        engine_args.update(
-            {
-                "pool_size": 5,
-                "max_overflow": 10,
-                "pool_timeout": 30,
-                "pool_recycle": 1800,  # Recycle connections after 30 minutes
-            }
+            # Additional logging for remote connections
+            if "@" in database_url:
+                host_part = database_url.split("@")[1].split("/")[0]
+                logger.info(f"Connecting to remote PostgreSQL database at {host_part}")
+        else:
+            logger.info("Using SQLite database")
+
+        logger.info("Attempting database connection...")
+
+        # Enhanced connection pool settings for PostgreSQL
+        engine_args = {}
+        if "postgresql" in database_url:
+            engine_args.update(
+                {
+                    "pool_size": 5,
+                    "max_overflow": 10,
+                    "pool_timeout": 30,
+                    "pool_recycle": 1800,  # Recycle connections after 30 minutes
+                    "pool_pre_ping": True,  # Enable connection health checks
+                }
+            )
+
+        engine = create_engine(
+            database_url,
+            connect_args=(
+                {"check_same_thread": False}
+                if database_url.startswith("sqlite")
+                else {}
+            ),
+            **engine_args,
         )
 
-    engine = create_engine(
-        database_url,
-        connect_args=(
-            {"check_same_thread": False} if database_url.startswith("sqlite") else {}
-        ),
-        **engine_args,
-    )
-    logger.info(f"Database engine created successfully")
+        # Add event listener for connection pool checkout
+        @event.listens_for(engine, "connect")
+        def connect(dbapi_connection, connection_record):
+            logger.debug("New database connection established")
 
-except Exception as e:
-    logger.error(f"Failed to create database engine: {e}")
-    logger.error("Falling back to SQLite database")
+        @event.listens_for(engine, "checkout")
+        def checkout(dbapi_connection, connection_record, connection_proxy):
+            logger.debug("Database connection checked out from pool")
 
-    # Fallback to SQLite in case of any error
-    sqlite_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "mental_maze.db"
-    )
-    fallback_url = f"sqlite:///{sqlite_path}"
-    logger.info(f"Using fallback database URL: {fallback_url}")
+        logger.info("Database engine created successfully")
+        return engine
 
-    engine = create_engine(fallback_url, connect_args={"check_same_thread": False})
+    except Exception as e:
+        logger.error(f"Failed to create database engine: {e}")
+        logger.error("Falling back to SQLite database")
 
+        sqlite_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+            "mental_maze.db",
+        )
+        fallback_url = f"sqlite:///{sqlite_path}"
+        logger.info(f"Using fallback database URL: {fallback_url}")
+
+        return create_engine(fallback_url, connect_args={"check_same_thread": False})
+
+
+# Create the engine
+engine = create_db_engine()
+
+# Create session factory with retry mechanism
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+
+@contextmanager
+def get_db() -> Generator:
+    """
+    Get a database session with automatic retry on connection errors.
+    Use as a context manager:
+    with get_db() as session:
+        session.query(...)
+    """
+    retry_count = 0
+    while True:
+        try:
+            db = SessionLocal()
+            try:
+                yield db
+                break
+            finally:
+                db.close()
+        except (OperationalError, DBAPIError) as e:
+            if retry_count >= MAX_RETRIES:
+                logger.error(
+                    f"Max retries ({MAX_RETRIES}) reached. Database error: {e}"
+                )
+                raise
+            retry_count += 1
+            logger.warning(f"Database error, attempt {retry_count}/{MAX_RETRIES}: {e}")
+            time.sleep(RETRY_DELAY)
+        except Exception as e:
+            logger.error(f"Unexpected database error: {e}")
+            raise
 
 
 def init_db():
