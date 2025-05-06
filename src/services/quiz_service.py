@@ -65,10 +65,18 @@ async def create_quiz(update: Update, context: CallbackContext):
 
     # Next, check if number of questions is specified
     num_questions = None
+
+    # Check for different patterns to extract number of questions
     questions_match = re.search(r"(\d+)\s+questions", command_text, re.IGNORECASE)
     if questions_match:
-        num_questions = min(int(questions_match.group(1)), 10)  # Limit to 10 max
+        num_questions = min(int(questions_match.group(1)), Config.MAX_QUIZ_QUESTIONS)
         logger.info(f"Detected number of questions: {num_questions}")
+
+    # Check for "create X quiz" format
+    create_match = re.search(r"create\s+(\d+)\s+quiz", command_text, re.IGNORECASE)
+    if create_match and not num_questions:
+        num_questions = min(int(create_match.group(1)), Config.MAX_QUIZ_QUESTIONS)
+        logger.info(f"Detected 'create X quiz' format: {num_questions} questions")
 
     # Also check for simple "Topic X" format where X is a number
     if num_questions is None:
@@ -76,7 +84,7 @@ async def create_quiz(update: Update, context: CallbackContext):
             r"(?:near|topic)\s+(\d+)", command_text, re.IGNORECASE
         )
         if simple_num_match:
-            num_questions = min(int(simple_num_match.group(1)), 10)
+            num_questions = min(int(simple_num_match.group(1)), Config.MAX_QUIZ_QUESTIONS)
             logger.info(f"Detected simple number format: {num_questions} questions")
 
     # Extract topic from the command
@@ -110,9 +118,20 @@ async def create_quiz(update: Update, context: CallbackContext):
         )
         return
 
-    # If no number of questions specified yet, default to 3
+    # If no number of questions specified yet, check if the topic contains a number
     if num_questions is None:
-        num_questions = 3
+        # Look for "create N quiz on <topic>" pattern
+        topic_num_match = re.search(r"create\s+(\d+)\s+quiz(?:\s+on)?\s+", command_text, re.IGNORECASE)
+        if topic_num_match:
+            num_questions = min(int(topic_num_match.group(1)), Config.MAX_QUIZ_QUESTIONS)
+            logger.info(f"Detected number in topic command: {num_questions} questions")
+
+            # Update the topic to remove the number specification
+            topic = re.sub(r"create\s+\d+\s+quiz(?:\s+on)?\s+", "", topic).strip()
+
+    # If still no number detected, default to Config.DEFAULT_QUIZ_QUESTIONS
+    if num_questions is None:
+        num_questions = Config.DEFAULT_QUIZ_QUESTIONS
 
     # Check if there's a large text block in the command itself
     # This handles cases where user includes text directly in the command
@@ -126,7 +145,7 @@ async def create_quiz(update: Update, context: CallbackContext):
             await safe_send_message(
                 context.bot,
                 update.effective_chat.id,
-                f"Generating {num_questions} quiz questions about '{topic}' based on the provided text. This may take a moment...",
+                f"Generating {num_questions} quiz question(s) about '{topic}' based on the provided text. This may take a moment...",
             )
 
             # Generate quiz questions from the large text
@@ -254,7 +273,7 @@ async def process_questions(
 
     # Calculate end time if duration was specified
     end_time = None
-    if duration_days or duration_hours or duration_minutes:
+    if (duration_days or duration_hours or duration_minutes) and total_minutes > 0:
         end_time = datetime.utcnow()
         if duration_days:
             end_time += timedelta(days=duration_days)

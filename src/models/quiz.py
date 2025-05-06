@@ -56,7 +56,7 @@ class QuizAnswer(Base):
         # Fix: Use string 'True' instead of boolean True for comparison
         correct_answers = (
             session.query(QuizAnswer)
-            .filter(QuizAnswer.quiz_id == quiz_id, QuizAnswer.is_correct == 'True')
+            .filter(QuizAnswer.quiz_id == quiz_id, QuizAnswer.is_correct == "True")
             .order_by(QuizAnswer.answered_at)
             .all()
         )

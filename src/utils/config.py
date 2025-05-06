@@ -34,8 +34,8 @@ class Config:
     )
 
     # Quiz Configuration
-    DEFAULT_QUIZ_QUESTIONS = 3
-    MAX_QUIZ_QUESTIONS = 10
+    DEFAULT_QUIZ_QUESTIONS = 1
+    MAX_QUIZ_QUESTIONS = 5
 
     # Production check helper
     @classmethod

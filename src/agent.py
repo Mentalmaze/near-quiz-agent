@@ -32,6 +32,23 @@ async def generate_quiz(topic, num_questions=1, context_text=None):
     # Initialize the chat model
     llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", api_key=GOOGLE_API_KEY)
 
+    # Check if this is a blockchain-related topic
+    blockchain_keywords = [
+        "blockchain",
+        "crypto",
+        "bitcoin",
+        "ethereum",
+        "solana",
+        "near",
+        "web3",
+        "defi",
+        "nft",
+        "token",
+    ]
+    is_blockchain_topic = any(
+        keyword in topic.lower() for keyword in blockchain_keywords
+    )
+
     # Preprocess context text if provided
     if context_text:
         context_text = preprocess_text(context_text)
@@ -54,7 +71,31 @@ async def generate_quiz(topic, num_questions=1, context_text=None):
         Make sure to extract relevant information from the text to create challenging questions.
         Number each question if generating multiple questions.
         """
+    elif is_blockchain_topic:
+        # Special template for blockchain topics with fact-checking instructions
+        template = """Generate {num_questions} factually accurate multiple choice quiz question(s) about {topic}.
+
+        IMPORTANT GUIDELINES FOR BLOCKCHAIN TOPICS:
+        - Verify that all information is technically accurate and up-to-date
+        - For blockchain-specific questions, be precise about:
+          * Native tokens (e.g., Bitcoin for Bitcoin blockchain, ETH for Ethereum, SOL for Solana)
+          * Consensus mechanisms (e.g., Proof of Work, Proof of Stake, Proof of History)
+          * Technical capabilities and limitations
+        - Ensure the correct answer is actually correct and the other options are clearly incorrect
+        - When unsure about a specific technical detail, use more general questions about the topic
+
+        Please format each question as follows:
+        Question: [question]
+        A) [option]
+        B) [option]
+        C) [option]
+        D) [option]
+        Correct Answer: [letter]
+
+        Number each question if generating multiple questions.
+        """
     else:
+        # Standard template for non-blockchain topics
         template = """Generate {num_questions} multiple choice quiz question(s) about {topic}.
 
         Please format each question as follows:
@@ -89,8 +130,65 @@ async def generate_quiz(topic, num_questions=1, context_text=None):
                 + (0.5 * min(int(num_questions), 10))
                 + (0.01 * min(len(context_text or ""), 1000))
             )
+
             response = await asyncio.wait_for(llm.ainvoke(messages), timeout=timeout)
+
+            # For blockchain topics, do an additional verification step
+            if is_blockchain_topic:
+                # Check generated content for common blockchain errors
+                quiz_content = response.content.lower()
+                has_errors = False
+
+                # Check for common blockchain factual errors
+                if (
+                    "solana" in topic.lower()
+                    and "ethereum" in quiz_content
+                    and "native token" in quiz_content
+                ):
+                    has_errors = True
+                elif (
+                    "near" in topic.lower()
+                    and "ethereum" in quiz_content
+                    and "native token" in quiz_content
+                ):
+                    has_errors = True
+
+                # If errors found, retry with more explicit correction instructions
+                if has_errors and attempt < max_attempts - 1:
+                    attempt += 1
+                    correction_template = """CORRECTION NEEDED: The previous quiz questions contained factual errors about blockchain technologies.
+
+                    Please generate {num_questions} FACTUALLY ACCURATE multiple choice quiz question(s) about {topic}.
+
+                    CRITICAL FACT VERIFICATION:
+                    - Solana's native token is SOL (not Ethereum or ETH)
+                    - NEAR Protocol's native token is NEAR (not Ethereum or ETH)
+                    - Ethereum's native token is ETH
+                    - Bitcoin's native token is BTC
+                    - Each blockchain has its own unique consensus mechanism and features
+
+                    Please format each question correctly:
+                    Question: [clear, factually accurate question]
+                    A) [option]
+                    B) [option]
+                    C) [option]
+                    D) [option]
+                    Correct Answer: [letter]
+
+                    Number each question if generating multiple questions.
+                    """
+                    correction_prompt = ChatPromptTemplate.from_template(
+                        correction_template
+                    )
+                    correction_messages = correction_prompt.format_messages(
+                        topic=topic, num_questions=num_questions
+                    )
+                    response = await asyncio.wait_for(
+                        llm.ainvoke(correction_messages), timeout=timeout
+                    )
+
             return response.content
+
         except asyncio.TimeoutError:
             attempt += 1
             last_exception = "Timeout error"
