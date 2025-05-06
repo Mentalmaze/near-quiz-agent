@@ -95,3 +95,27 @@ def init_db():
         # Only create tables that don't exist
         UserBase.metadata.create_all(bind=engine)
         QuizBase.metadata.create_all(bind=engine)
+
+
+def migrate_schema():
+    """Handle schema migrations for existing database structures."""
+    try:
+        # For BigInteger migration, we need to recreate the table
+        # This is destructive, so we'll log it clearly
+        logger.warning(
+            "Migrating database schema - this may involve dropping and recreating tables"
+        )
+
+        # We specifically need to update the quizzes table for the BigInteger change
+        QuizBase.metadata.drop_all(
+            bind=engine, tables=[QuizBase.metadata.tables["quizzes"]]
+        )
+        QuizBase.metadata.create_all(
+            bind=engine, tables=[QuizBase.metadata.tables["quizzes"]]
+        )
+
+        logger.info("Schema migration completed successfully")
+        return True
+    except Exception as e:
+        logger.error(f"Schema migration failed: {e}")
+        return False

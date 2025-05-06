@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Enum, JSON, DateTime, Integer
+from sqlalchemy import Column, String, Enum, JSON, DateTime, BigInteger, Integer
 from sqlalchemy.ext.declarative import declarative_base
 import enum
 import uuid
@@ -27,7 +27,9 @@ class Quiz(Base):
     last_updated = Column(
         DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow
     )
-    group_chat_id = Column(Integer, nullable=True)
+    group_chat_id = Column(
+        BigInteger, nullable=True
+    )  # Changed from Integer to BigInteger
     # Quiz end time
     end_time = Column(DateTime, nullable=True)
     # Track if winners have been announced
