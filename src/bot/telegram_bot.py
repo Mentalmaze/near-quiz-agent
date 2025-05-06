@@ -111,15 +111,15 @@ class TelegramBot:
                 # In TOPIC state we only accept text messages in private chat
                 TOPIC: [
                     MessageHandler(
-                        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, 
-                        topic_received
+                        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
+                        topic_received,
                     )
                 ],
                 # In SIZE state we only accept text messages in private chat
                 SIZE: [
                     MessageHandler(
-                        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, 
-                        size_received
+                        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
+                        size_received,
                     )
                 ],
                 # For callback queries, we don't need to filter by chat type as they're handled correctly
@@ -131,8 +131,8 @@ class TelegramBot:
                 # Text input for context should be in private chat
                 CONTEXT_INPUT: [
                     MessageHandler(
-                        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, 
-                        context_input
+                        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
+                        context_input,
                     )
                 ],
                 # For callback queries, we don't need to filter by chat type
@@ -144,8 +144,8 @@ class TelegramBot:
                 # Text input for duration should be in private chat
                 DURATION_INPUT: [
                     MessageHandler(
-                        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, 
-                        duration_input
+                        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND,
+                        duration_input,
                     )
                 ],
                 # Final confirmation is a callback query
@@ -162,9 +162,13 @@ class TelegramBot:
             conversation_timeout=300,  # 5 minutes
             # Important: Set a name for debugging purposes
             name="quiz_creation",
+            # Key conversation by user_id, not by chat_id, for group->DM flow
+            per_chat=False,
+            # Persist conversation state across bot restarts (requires persistence setup)
+            # persistent=True, # Consider adding persistence later
         )
         self.app.add_handler(conv)
-        
+
         # THEN register other command handlers
         logger.info("Registering command handlers")
         self.app.add_handler(CommandHandler("linkwallet", link_wallet_handler))
@@ -176,7 +180,7 @@ class TelegramBot:
 
         # Handle callback queries for quiz answers
         self.app.add_handler(CallbackQueryHandler(quiz_answer_handler))
-        
+
         # Handle private text messages (MUST BE LAST as it's the most generic)
         # Only messages not handled by other handlers will reach this
         logger.info("Registering private message handler (lowest priority)")

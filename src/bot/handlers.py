@@ -41,39 +41,53 @@ async def group_start(update, context):
 
 async def start_createquiz_group(update, context):
     """Entry point for the quiz creation conversation"""
-    # Check if we're in a group or private chat
-    if update.effective_chat.type != "private":
-        user = update.effective_user
-        logger.info(f"User {user.id} started quiz creation from group chat")
+    user = update.effective_user
+    chat_type = update.effective_chat.type
+    logger.info(
+        f"User {user.id} initiating /createquiz from {chat_type} chat {update.effective_chat.id}."
+    )
+    logger.info(f"Initial context.user_data for user {user.id}: {context.user_data}")
+
+    if chat_type != "private":
+        logger.info(
+            f"User {user.id} started quiz creation from group chat {update.effective_chat.id}. Will DM."
+        )
         await update.message.reply_text(
             f"@{user.username}, let's create a quiz! I'll message you privately to set it up."
         )
-        # Send a message to the user privately
         await context.bot.send_message(
-            chat_id=user.id,
-            text="Great—what topic would you like your quiz to cover?"
+            chat_id=user.id, text="Great—what topic would you like your quiz to cover?"
         )
-        # Store the original group chat ID for later announcements
         context.user_data["group_chat_id"] = update.effective_chat.id
+        logger.info(
+            f"Stored group_chat_id {update.effective_chat.id} for user {user.id}. user_data: {context.user_data}"
+        )
         return TOPIC
     else:
-        # Already in a private chat
-        logger.info(f"User {update.effective_user.id} started quiz creation from private chat")
+        logger.info(f"User {user.id} started quiz creation directly in private chat.")
         await update.message.reply_text(
             "Great—what topic would you like your quiz to cover?"
         )
+        # Clear any potential leftover group_chat_id if starting fresh in DM
+        if "group_chat_id" in context.user_data:
+            del context.user_data["group_chat_id"]
+        logger.info(f"User {user.id} in private chat. user_data: {context.user_data}")
         return TOPIC
 
 
 async def topic_received(update, context):
-    logger.info(f"Received topic: {update.message.text} from user {update.effective_user.id}")
+    logger.info(
+        f"Received topic: {update.message.text} from user {update.effective_user.id}"
+    )
     context.user_data["topic"] = update.message.text.strip()
     await update.message.reply_text("How many questions? (send a number)")
     return SIZE
 
 
 async def size_received(update, context):
-    logger.info(f"Received size: {update.message.text} from user {update.effective_user.id}")
+    logger.info(
+        f"Received size: {update.message.text} from user {update.effective_user.id}"
+    )
     try:
         n = int(update.message.text.strip())
     except ValueError:
@@ -131,29 +145,58 @@ async def context_input(update, context):
 async def duration_choice(update, context):
     choice = update.callback_query.data
     await update.callback_query.answer()
+    logger.info(f"duration_choice: User {update.effective_user.id} selected {choice}")
+    
     if choice == "set_duration":
         await update.callback_query.message.reply_text(
             "Send duration, e.g. '5 minutes' or '2 hours'."
         )
+        logger.info(f"duration_choice: Returning DURATION_INPUT state for user {update.effective_user.id}")
         return DURATION_INPUT
     # skip
     context.user_data["duration_seconds"] = None
+    logger.info(f"duration_choice: User {update.effective_user.id} skipped duration, going to confirm_prompt")
     # preview
     return await confirm_prompt(update, context)
 
 
 async def duration_input(update, context):
-    txt = update.message.text.strip().lower()
+    user_id = update.effective_user.id
+    message_text = update.message.text
+    logger.info(
+        f"Attempting to process DURATION_INPUT: '{message_text}' from user {user_id}"
+    )
+    logger.debug(f"User data for {user_id} at duration_input: {context.user_data}")
+    txt = message_text.strip().lower()
     # simple parse
-    import re, datetime
+    import re
 
-    m = re.match(r"(\d+)\s*(minute|hour)s?", txt)
+    m = re.match(r"(\d+)\s*(minute|hour|min)s?", txt)
     if m:
-        val, unit = int(m.group(1)), m.group(2)
+        val = int(m.group(1))
+        unit = m.group(2)
         secs = val * (3600 if unit.startswith("hour") else 60)
         context.user_data["duration_seconds"] = secs
+        logger.info(
+            f"Successfully parsed duration for user {user_id}: {secs} seconds from '{message_text}'"
+        )
     else:
-        context.user_data["duration_seconds"] = None
+        # Try a more flexible regex
+        m = re.search(r"(\d+)", txt)
+        if m and ("minute" in txt.lower() or "min" in txt.lower()):
+            val = int(m.group(1))
+            secs = val * 60
+            context.user_data["duration_seconds"] = secs
+            logger.info(f"Flexibly parsed duration: {secs} seconds from '{message_text}'")
+        elif m and "hour" in txt.lower():
+            val = int(m.group(1))
+            secs = val * 3600
+            context.user_data["duration_seconds"] = secs
+            logger.info(f"Flexibly parsed duration: {secs} seconds from '{message_text}'")
+        else:
+            context.user_data["duration_seconds"] = 300  # Default to 5 minutes
+            logger.info(f"Could not parse duration from '{message_text}'. Using default: 300 seconds")
+            await update.message.reply_text("I couldn't understand that format. Using 5 minutes by default.")
     return await confirm_prompt(update, context)
 
 
@@ -197,12 +240,12 @@ async def confirm_choice(update, context):
 
     # Call process_questions to store in DB and announce
     await process_questions(
-        update, 
-        context, 
-        data["topic"], 
-        quiz_text, 
+        update,
+        context,
+        data["topic"],
+        quiz_text,
         group_id if group_id else update.effective_chat.id,
-        None
+        None,
     )
     # schedule auto distribution
     if data.get("duration_seconds"):
@@ -210,9 +253,7 @@ async def confirm_choice(update, context):
 
         context.application.create_task(
             schedule_auto_distribution(
-                context.application, 
-                data.get("quiz_id", None), 
-                data["duration_seconds"]
+                context.application, data.get("quiz_id", None), data["duration_seconds"]
             )
         )
     return ConversationHandler.END
@@ -241,18 +282,26 @@ async def quiz_answer_handler(update: Update, context: CallbackContext):
 
 async def private_message_handler(update: Update, context: CallbackContext):
     """Route private text messages to the appropriate handler."""
-    # Log the private message for debugging
-    logger.info(f"Received private message: '{update.message.text}' from user {update.effective_user.id}")
-    
-    # Check if we have an awaiting state in context.user_data
-    if "awaiting" in context.user_data:
-        logger.info(f"Found awaiting state: {context.user_data['awaiting']}")
+    user_id = update.effective_user.id
+    message_text = update.message.text
+    logger.info(
+        f"PRIVATE_MESSAGE_HANDLER received: '{message_text}' from user {user_id}"
+    )
+    # Log the entire user_data to see if 'awaiting_reward_quiz_id' is present
+    logger.info(
+        f"User_data for {user_id} in private_message_handler: {context.user_data}"
+    )
+
+    if context.user_data.get("awaiting_reward_quiz_id"):
+        logger.info(
+            f"User {user_id} has 'awaiting_reward_quiz_id': {context.user_data['awaiting_reward_quiz_id']}. Passing to handle_reward_structure."
+        )
         await handle_reward_structure(update, context)
         return
-    
-    # No awaiting state, this might be a conversation message
-    # The ConversationHandler will catch it if applicable
-    logger.info("No awaiting state found, might be handled by ConversationHandler")
+
+    logger.info(
+        f"Message from user {user_id} ('{message_text}') is NOT for reward structure (awaiting_reward_quiz_id not found or false). Checking ConversationHandler."
+    )
 
 
 async def winners_handler(update: Update, context: CallbackContext):

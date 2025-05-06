@@ -264,6 +264,7 @@ async def process_questions(
     duration_minutes=None,
 ):
     """Process multiple questions from raw text and save them as a quiz."""
+    logger.info(f"Processing questions for topic: {topic}")
 
     # Parse multiple questions
     questions_list = parse_multiple_questions(questions_raw)
@@ -310,6 +311,7 @@ async def process_questions(
         session.add(quiz)
         session.commit()
         quiz_id = quiz.id
+        logger.info(f"Created quiz with ID: {quiz_id}")
     finally:
         session.close()
 
@@ -330,6 +332,11 @@ async def process_questions(
         update.effective_user.id,
         "Please specify the reward structure in this private chat (e.g., '2 Near for 1st, 1 Near for 2nd').",
     )
+    
+    # Set the awaiting flags correctly for both formats
+    context.user_data["awaiting"] = "reward_structure"
+    context.user_data["awaiting_reward_quiz_id"] = quiz_id
+    logger.info(f"Set awaiting flag for reward structure for quiz ID: {quiz_id}")
 
     # If quiz has an end time, schedule auto distribution task
     if end_time:
