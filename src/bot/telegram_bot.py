@@ -102,40 +102,53 @@ class TelegramBot:
             distribute_rewards_handler,
         )
 
-        # Conversation for interactive quiz creation (in private DM)
+        # Conversation for interactive quiz creation needs to be registered FIRST
+        # to ensure it gets priority for handling messages
+        logger.info("Registering conversation handler for quiz creation")
         conv = ConversationHandler(
             entry_points=[CommandHandler("createquiz", start_createquiz_group)],
             states={
+                # In TOPIC state we only accept text messages in private chat
                 TOPIC: [
                     MessageHandler(
-                        filters.TEXT & filters.ChatType.PRIVATE, topic_received
+                        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, 
+                        topic_received
                     )
                 ],
+                # In SIZE state we only accept text messages in private chat
                 SIZE: [
                     MessageHandler(
-                        filters.TEXT & filters.ChatType.PRIVATE, size_received
+                        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, 
+                        size_received
                     )
                 ],
+                # For callback queries, we don't need to filter by chat type as they're handled correctly
                 CONTEXT_CHOICE: [
                     CallbackQueryHandler(
                         context_choice, pattern="^(paste|skip_context)$"
                     )
                 ],
+                # Text input for context should be in private chat
                 CONTEXT_INPUT: [
                     MessageHandler(
-                        filters.TEXT & filters.ChatType.PRIVATE, context_input
+                        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, 
+                        context_input
                     )
                 ],
+                # For callback queries, we don't need to filter by chat type
                 DURATION_CHOICE: [
                     CallbackQueryHandler(
                         duration_choice, pattern="^(set_duration|skip_duration)$"
                     )
                 ],
+                # Text input for duration should be in private chat
                 DURATION_INPUT: [
                     MessageHandler(
-                        filters.TEXT & filters.ChatType.PRIVATE, duration_input
+                        filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, 
+                        duration_input
                     )
                 ],
+                # Final confirmation is a callback query
                 CONFIRM: [CallbackQueryHandler(confirm_choice, pattern="^(yes|no)$")],
             },
             fallbacks=[
@@ -143,11 +156,17 @@ class TelegramBot:
                     "cancel", lambda update, context: ConversationHandler.END
                 )
             ],
+            # Allow the conversation to be restarted if the user runs /createquiz again
             allow_reentry=True,
+            # Set a higher conversation timeout - default is 30s which is too short
+            conversation_timeout=300,  # 5 minutes
+            # Important: Set a name for debugging purposes
+            name="quiz_creation",
         )
         self.app.add_handler(conv)
-
-        # Legacy single-command /createquiz removed in favor of interactive flow
+        
+        # THEN register other command handlers
+        logger.info("Registering command handlers")
         self.app.add_handler(CommandHandler("linkwallet", link_wallet_handler))
         self.app.add_handler(CommandHandler("playquiz", play_quiz_handler))
         self.app.add_handler(CommandHandler("winners", winners_handler))
@@ -155,10 +174,12 @@ class TelegramBot:
             CommandHandler("distributerewards", distribute_rewards_handler)
         )
 
-        # Handle callback queries (for quiz answers)
+        # Handle callback queries for quiz answers
         self.app.add_handler(CallbackQueryHandler(quiz_answer_handler))
-
-        # Handle private text messages (e.g., reward structure inputs, wallet addresses)
+        
+        # Handle private text messages (MUST BE LAST as it's the most generic)
+        # Only messages not handled by other handlers will reach this
+        logger.info("Registering private message handler (lowest priority)")
         self.app.add_handler(
             MessageHandler(
                 filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND,

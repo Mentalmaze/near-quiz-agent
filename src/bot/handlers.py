@@ -19,6 +19,10 @@ from services.quiz_service import (
 )
 from services.user_service import link_wallet
 from agent import generate_quiz
+import logging
+
+# Configure logger
+logger = logging.getLogger(__name__)
 
 # Define conversation states
 TOPIC, SIZE, CONTEXT_CHOICE, CONTEXT_INPUT, DURATION_CHOICE, DURATION_INPUT, CONFIRM = (
@@ -26,28 +30,50 @@ TOPIC, SIZE, CONTEXT_CHOICE, CONTEXT_INPUT, DURATION_CHOICE, DURATION_INPUT, CON
 )
 
 
-async def start_createquiz_group(update, context):
-    # entrypoint when user runs /createquiz in a group chat
-    group_id = update.effective_chat.id
-    context.user_data["group_chat_id"] = group_id
+async def group_start(update, context):
+    """Handle /createquiz in group chat by telling user to DM the bot."""
     user = update.effective_user
     await update.message.reply_text(
-        f"@{user.username}, I've sent you a DM to set up your quiz."
+        f"@{user.username}, to set up a quiz, please DM me and send /createquiz."
     )
-    # kick off DM flow
-    await context.bot.send_message(
-        chat_id=user.id, text="Great—what topic would you like your quiz to cover?"
-    )
-    return TOPIC
+    # no conversation state here
+
+
+async def start_createquiz_group(update, context):
+    """Entry point for the quiz creation conversation"""
+    # Check if we're in a group or private chat
+    if update.effective_chat.type != "private":
+        user = update.effective_user
+        logger.info(f"User {user.id} started quiz creation from group chat")
+        await update.message.reply_text(
+            f"@{user.username}, let's create a quiz! I'll message you privately to set it up."
+        )
+        # Send a message to the user privately
+        await context.bot.send_message(
+            chat_id=user.id,
+            text="Great—what topic would you like your quiz to cover?"
+        )
+        # Store the original group chat ID for later announcements
+        context.user_data["group_chat_id"] = update.effective_chat.id
+        return TOPIC
+    else:
+        # Already in a private chat
+        logger.info(f"User {update.effective_user.id} started quiz creation from private chat")
+        await update.message.reply_text(
+            "Great—what topic would you like your quiz to cover?"
+        )
+        return TOPIC
 
 
 async def topic_received(update, context):
+    logger.info(f"Received topic: {update.message.text} from user {update.effective_user.id}")
     context.user_data["topic"] = update.message.text.strip()
     await update.message.reply_text("How many questions? (send a number)")
     return SIZE
 
 
 async def size_received(update, context):
+    logger.info(f"Received size: {update.message.text} from user {update.effective_user.id}")
     try:
         n = int(update.message.text.strip())
     except ValueError:
@@ -167,21 +193,26 @@ async def confirm_choice(update, context):
     # post to group
     group_id = data.get("group_chat_id")
     # process questions from raw text
-    from handlers import process_questions
+    from services.quiz_service import process_questions
 
-    # simulate an update.object for process_questions: we only need chat and user
-    fake_update = update
-    fake_update.effective_chat = update.effective_chat
-    fake_update.effective_chat.id = group_id
-    # call process_questions to store in DB and announce
-    await process_questions(update, context, data["topic"], quiz_text, group_id, None)
+    # Call process_questions to store in DB and announce
+    await process_questions(
+        update, 
+        context, 
+        data["topic"], 
+        quiz_text, 
+        group_id if group_id else update.effective_chat.id,
+        None
+    )
     # schedule auto distribution
     if data.get("duration_seconds"):
         from services.quiz_service import schedule_auto_distribution
 
         context.application.create_task(
             schedule_auto_distribution(
-                context.application, process_questions, data["duration_seconds"]
+                context.application, 
+                data.get("quiz_id", None), 
+                data["duration_seconds"]
             )
         )
     return ConversationHandler.END
@@ -210,7 +241,18 @@ async def quiz_answer_handler(update: Update, context: CallbackContext):
 
 async def private_message_handler(update: Update, context: CallbackContext):
     """Route private text messages to the appropriate handler."""
-    await handle_reward_structure(update, context)
+    # Log the private message for debugging
+    logger.info(f"Received private message: '{update.message.text}' from user {update.effective_user.id}")
+    
+    # Check if we have an awaiting state in context.user_data
+    if "awaiting" in context.user_data:
+        logger.info(f"Found awaiting state: {context.user_data['awaiting']}")
+        await handle_reward_structure(update, context)
+        return
+    
+    # No awaiting state, this might be a conversation message
+    # The ConversationHandler will catch it if applicable
+    logger.info("No awaiting state found, might be handled by ConversationHandler")
 
 
 async def winners_handler(update: Update, context: CallbackContext):

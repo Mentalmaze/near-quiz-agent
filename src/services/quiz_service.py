@@ -741,17 +741,24 @@ async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def handle_reward_structure(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Process reward structure from quiz creator in private chat."""
+    # Only proceed if user_data indicates we're awaiting reward structure or wallet steps
+    valid_states = (
+        "reward_structure",
+        "wallet_address",
+        "signature",
+        "transaction_hash",
+    )
+    if context.user_data.get("awaiting") not in valid_states:
+        return
     # Skip if this isn't a private chat
     if update.effective_chat.type != "private":
         return
-
-    # Skip if we're not awaiting a reward structure
+    # Handle wallet linking or transaction steps
     if context.user_data.get("awaiting") in (
         "wallet_address",
         "signature",
         "transaction_hash",
     ):
-        # This is for wallet linking flow or transaction hash verification
         from services.user_service import handle_wallet_address, handle_signature
         from services.blockchain import BlockchainMonitor
 
@@ -839,7 +846,7 @@ async def handle_reward_structure(update: Update, context: ContextTypes.DEFAULT_
 
     await safe_send_message(context.bot, update.effective_chat.id, msg)
 
-    # Set context to await transaction hash
+    # Now expect transaction hash next
     context.user_data["awaiting"] = "transaction_hash"
     context.user_data["quiz_id"] = quiz_id
 
