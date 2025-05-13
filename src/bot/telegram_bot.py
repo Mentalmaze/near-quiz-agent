@@ -240,14 +240,6 @@ class TelegramBot:
 
             # REMOVED: await self.app.bot.set_webhook(...) - updater.start_webhook will handle this.
 
-        certificate = None
-        if self.certificate_path:
-            try:
-                with open(self.certificate_path, "rb") as cert_file:
-                    certificate = cert_file.read()
-                logger.info(f"Loaded certificate from {self.certificate_path}")
-            except Exception as e:
-                logger.error(f"Failed to load certificate: {e}")
             # Start the webhook server
             await self.app.updater.start_webhook(
                 listen=self.webhook_listen_ip,
@@ -256,7 +248,7 @@ class TelegramBot:
                 webhook_url=self.webhook_url,
                 allowed_updates=allowed_updates_list,
                 drop_pending_updates=True,
-                cert=certificate,
+                cert=self.certificate_path,
             )
             logger.info(
                 f"Webhook server set up to listen on {self.webhook_listen_ip}:{self.webhook_port} for path /{self.webhook_url_path} and registered with URL {self.webhook_url}/{self.webhook_url_path}"
