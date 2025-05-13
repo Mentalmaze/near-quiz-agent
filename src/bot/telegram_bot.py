@@ -22,7 +22,14 @@ logger = logging.getLogger(__name__)
 
 
 class TelegramBot:
-    def __init__(self, token: str):
+    def __init__(
+        self,
+        token: str,
+        webhook_url: str = None,
+        webhook_listen_ip: str = None,
+        webhook_port: int = None,
+        webhook_url_path: str = None,
+    ):
         # Build the Telegram application with increased connection timeout and retry settings
         self.app = (
             ApplicationBuilder()
@@ -37,6 +44,11 @@ class TelegramBot:
             .build()
         )
         self.blockchain_monitor = None
+        self.webhook_url = webhook_url
+        self.webhook_listen_ip = webhook_listen_ip
+        self.webhook_port = webhook_port
+        self.webhook_url_path = webhook_url_path
+        self._stop_signal = asyncio.Future()  # For graceful shutdown signal
 
     @staticmethod
     async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -204,35 +216,108 @@ class TelegramBot:
         self.app.blockchain_monitor = self.blockchain_monitor
 
     async def start(self):
-        """Start polling for updates and initialize services."""
+        """Start the bot using webhook or polling, and initialize services."""
         logger.info("Initializing blockchain monitor...")
         await self.init_blockchain()
 
-        logger.info("Starting Telegram bot...")
         await self.app.initialize()
         await self.app.start()
-        await self.app.updater.start_polling(
-            drop_pending_updates=True,
-            allowed_updates=[
-                "message",
-                "callback_query",
-            ],  # Only process specific updates
-        )
-        logger.info("Bot is running!")
 
-        # Keep the application running with a simple infinite loop
-        try:
-            # Create a never-ending task
-            stop_signal = asyncio.Future()
-            await stop_signal
-        except asyncio.CancelledError:
-            # Handle graceful shutdown
-            logger.info("Shutting down...")
-            pass
-        finally:
-            # Ensure proper cleanup when the bot is stopped
-            if self.blockchain_monitor:
-                try:
-                    await self.blockchain_monitor.stop_monitoring()
-                except Exception as e:
-                    logger.error(f"Error stopping blockchain monitor: {e}")
+        allowed_updates_list = ["message", "callback_query"]
+
+        if (
+            self.webhook_url
+            and self.webhook_listen_ip
+            and self.webhook_port
+            and self.webhook_url_path
+        ):
+            logger.info(
+                f"Starting Telegram bot in WEBHOOK mode. URL: {self.webhook_url}/{self.webhook_url_path}, Listen IP: {self.webhook_listen_ip}, Port: {self.webhook_port}"
+            )
+
+            # Set the webhook
+            await self.app.bot.set_webhook(
+                url=f"{self.webhook_url}/{self.webhook_url_path}",
+                allowed_updates=allowed_updates_list,
+                drop_pending_updates=True,
+            )
+
+            # Start the webhook server
+            # start_webhook is blocking, so it should be the last thing called in this branch
+            # or run in a way that doesn't block the main thread if other async tasks need to run concurrently
+            # For this structure, it's assumed main.py handles the overall asyncio loop management.
+            # The `application.run_webhook` or `updater.start_webhook` are typically blocking.
+            await self.app.updater.start_webhook(
+                listen=self.webhook_listen_ip,
+                port=self.webhook_port,
+                url_path=self.webhook_url_path,
+                allowed_updates=allowed_updates_list,
+                drop_pending_updates=True,
+            )
+            logger.info(
+                f"Webhook server listening on {self.webhook_listen_ip}:{self.webhook_port} with path /{self.webhook_url_path}"
+            )
+            # Since start_webhook is blocking, the bot will run until updater.stop() is called.
+            # The _stop_signal might not be directly awaited here if start_webhook blocks.
+            # It will be used by the stop() method to signal shutdown.
+        else:
+            logger.info("Starting Telegram bot in POLLING mode.")
+            await self.app.updater.start_polling(
+                drop_pending_updates=True,
+                allowed_updates=allowed_updates_list,
+            )
+            logger.info("Bot is running with polling!")
+            # Keep the application running with polling
+            try:
+                await self._stop_signal  # Wait for stop signal
+            except asyncio.CancelledError:
+                logger.info("Polling stop signal received via CancelledError.")
+            finally:
+                logger.info("Polling loop ended.")
+
+    async def stop(self):
+        """Gracefully stop the bot and its services."""
+        logger.info("Attempting to gracefully stop the bot...")
+
+        # Signal the polling loop to stop if it's waiting on _stop_signal
+        if not self._stop_signal.done():
+            self._stop_signal.set_result(True)
+
+        if self.blockchain_monitor:
+            try:
+                logger.info("Stopping blockchain monitor...")
+                await self.blockchain_monitor.stop_monitoring()
+                logger.info("Blockchain monitor stopped.")
+            except Exception as e:
+                logger.error(f"Error stopping blockchain monitor: {e}", exc_info=True)
+
+        if self.app.updater and self.app.updater.running:
+            logger.info("Stopping Telegram updater (polling/webhook)...")
+            await self.app.updater.stop()
+            logger.info("Telegram updater stopped.")
+
+        if self.webhook_url:
+            try:
+                logger.info(
+                    f"Attempting to delete webhook: {self.webhook_url}/{self.webhook_url_path}"
+                )
+                # Only delete if a webhook was actually set by this instance
+                # Check if bot is not None and has a last_webhook_info or similar attribute if available,
+                # or just attempt deletion.
+                if await self.app.bot.delete_webhook(drop_pending_updates=True):
+                    logger.info("Webhook deleted successfully.")
+                else:
+                    logger.warning("Failed to delete webhook or no webhook was set.")
+            except Exception as e:
+                logger.error(f"Error deleting webhook: {e}", exc_info=True)
+
+        if self.app.running:  # Check if application is running before stopping
+            logger.info("Stopping Telegram application...")
+            await self.app.stop()
+            logger.info("Telegram application stopped.")
+
+        logger.info("Shutting down Telegram application...")
+        await self.app.shutdown()
+        logger.info("Telegram application shut down.")
+
+        logger.info("Bot shutdown process complete.")

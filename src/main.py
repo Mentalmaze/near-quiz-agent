@@ -18,9 +18,13 @@ from store.database import init_db, migrate_schema
 
 logger = logging.getLogger(__name__)
 
+# Keep a global reference to the bot for shutdown
+bot_instance = None
+
 
 async def main():
     """Start the bot and initialize necessary services."""
+    global bot_instance
 
     # # Try to migrate schema if using PostgreSQL
     # if "postgresql" in Config.DATABASE_URL or "postgres" in Config.DATABASE_URL:
@@ -31,16 +35,89 @@ async def main():
     # init_db()
 
     # Start telegram bot
-    bot = TelegramBot(token=Config.TELEGRAM_TOKEN)
-    bot.register_handlers()
-    await bot.start()
+    # Check if WEBHOOK_URL is defined and not empty in Config
+    if hasattr(Config, "WEBHOOK_URL") and Config.WEBHOOK_URL:
+        # Provide sensible defaults if specific webhook config values are missing
+        webhook_listen_ip = getattr(Config, "WEBHOOK_LISTEN_IP", "0.0.0.0")
+        webhook_port = int(
+            getattr(Config, "WEBHOOK_PORT", 8443)
+        )  # Ensure port is an int
+        # Use TELEGRAM_TOKEN as default webhook path if WEBHOOK_URL_PATH is not set
+        webhook_url_path = getattr(Config, "WEBHOOK_URL_PATH", Config.TELEGRAM_TOKEN)
+
+        logger.info(
+            f"Initializing bot in WEBHOOK mode. URL: {Config.WEBHOOK_URL}, Port: {webhook_port}"
+        )
+
+        bot_instance = TelegramBot(
+            token=Config.TELEGRAM_TOKEN,
+            webhook_url=Config.WEBHOOK_URL,  # Full base URL for the webhook (e.g., https://your.domain.com)
+            webhook_listen_ip=webhook_listen_ip,  # IP address to listen on (e.g., 0.0.0.0)
+            webhook_port=webhook_port,  # Port to listen on (e.g., 8443)
+            webhook_url_path=webhook_url_path,  # Path for the webhook (e.g., /your-bot-token)
+        )
+    else:
+        logger.info(
+            "Initializing bot with polling (WEBHOOK_URL not configured or empty)."
+        )
+        bot_instance = TelegramBot(token=Config.TELEGRAM_TOKEN)
+
+    bot_instance.register_handlers()
+    await bot_instance.start()  # This method in TelegramBot should handle either polling or webhook start
 
 
 if __name__ == "__main__":
+    loop = asyncio.get_event_loop()
+    main_task = None  # To hold the main task
+
     try:
-        asyncio.run(main())
+        main_task = loop.create_task(main())
+        loop.run_until_complete(main_task)
     except KeyboardInterrupt:
-        logger.info("Bot stopped by user.")
+        logger.info("Bot stopping due to KeyboardInterrupt...")
     except Exception as e:
-        logger.error(f"Unhandled exception: {e}", exc_info=True)
-        sys.exit(1)
+        logger.error(f"Unhandled exception in main execution: {e}", exc_info=True)
+    finally:
+        if bot_instance and hasattr(bot_instance, "stop"):
+            logger.info("Attempting to gracefully stop the bot...")
+            try:
+                # Ensure the loop is available to run the async stop method
+                if loop.is_closed():
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+
+                # If main_task was cancelled or errored, it might affect bot_instance.stop()
+                # if it relies on the same loop/context that just failed.
+                # Running stop in a new context if needed or ensuring it's robust.
+                loop.run_until_complete(bot_instance.stop())
+            except Exception as e_stop:
+                logger.error(f"Error during bot stop: {e_stop}", exc_info=True)
+
+        # Cancel the main task if it's still pending (e.g., KeyboardInterrupt)
+        if main_task and not main_task.done():
+            main_task.cancel()
+            try:
+                loop.run_until_complete(main_task)  # Allow cancellation to propagate
+            except asyncio.CancelledError:
+                logger.info("Main task cancelled.")
+            except Exception as e_cancel:  # Log other errors during cancellation
+                logger.error(f"Error cancelling main task: {e_cancel}", exc_info=True)
+
+        # Close the loop only if we are sure it's not needed by other components
+        # If using webhooks with some libraries, they might manage their own loop or expect it to remain.
+        # For now, let's assume we can close it if we started it for stop().
+        # if not loop.is_running() and loop is not asyncio.get_event_loop(): # Avoid closing global loop if we didn't own it
+        #    loop.close()
+
+        logger.info("Bot shutdown process complete.")
+
+        # Determine exit code
+        exit_code = 0
+        # Check if an exception occurred that wasn't KeyboardInterrupt
+        if (
+            "e" in locals()
+            and isinstance(locals()["e"], Exception)
+            and not isinstance(locals()["e"], KeyboardInterrupt)
+        ):
+            exit_code = 1
+        sys.exit(exit_code)
