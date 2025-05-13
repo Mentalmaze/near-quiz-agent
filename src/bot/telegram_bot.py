@@ -30,6 +30,7 @@ class TelegramBot:
         webhook_port: int = None,
         webhook_url_path: str = None,
         certificate_path: str = None,
+        private_key_path: str = None,
     ):
         # Build the Telegram application with increased connection timeout and retry settings
         self.app = (
@@ -50,6 +51,7 @@ class TelegramBot:
         self.webhook_port = webhook_port
         self.webhook_url_path = webhook_url_path
         self.certificate_path = certificate_path
+        self.private_key_path = private_key_path
 
         self._stop_signal = asyncio.Future()  # For graceful shutdown signal
 
@@ -257,10 +259,11 @@ class TelegramBot:
                     await self.app.updater.start_webhook(
                         listen=self.webhook_listen_ip,
                         port=current_port,
-                        # url_path=self.webhook_url_path,  # Let PTB default this to bot.token
-                        webhook_url=self.webhook_url,
+                        url_path=self.webhook_url_path,  # We need to specify this explicitly
+                        webhook_url=f"{self.webhook_url}/{self.webhook_url_path}",
                         allowed_updates=allowed_updates_list,
                         drop_pending_updates=True,
+                        key=self.private_key_path,
                         cert=self.certificate_path,
                     )
                     logger.info(

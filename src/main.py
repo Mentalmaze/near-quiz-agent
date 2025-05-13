@@ -47,11 +47,17 @@ async def main():
             Config, "WEBHOOK_URL_PATH", None
         )  # Get value from Config, could be None
         webhook_url_path = config_url_path if config_url_path else Config.TELEGRAM_TOKEN
-        certificate_path = getattr(Config, "CERTIFICATE_PATH", None)
+        # Get certificate and key paths for SSL
+        certificate_path = getattr(Config, "SSL_CERT_PATH", None)
+        private_key_path = getattr(Config, "SSL_PRIVATE_KEY_PATH", None)
+
         # Define port range for retry (webhook_port to webhook_port + 10)
         webhook_port_max = webhook_port + 10
         logger.info(
             f"Initializing bot in WEBHOOK mode. URL: {Config.WEBHOOK_URL}, Port: {webhook_port} (with retries up to {webhook_port_max})"
+        )
+        logger.info(
+            f"Certificate path: {certificate_path}, Private key path: {private_key_path}"
         )
 
         bot_instance = TelegramBot(
@@ -61,6 +67,7 @@ async def main():
             webhook_port=webhook_port,  # Port to listen on (e.g., 8443)
             webhook_url_path=webhook_url_path,  # Path for the webhook (e.g., /your-bot-token)
             certificate_path=certificate_path,
+            private_key_path=private_key_path,
         )
     else:
         logger.info(
@@ -73,6 +80,9 @@ async def main():
 
 
 if __name__ == "__main__":
+    # To quickly force polling mode for testing, uncomment next line:
+    # Config.WEBHOOK_URL = None
+
     loop = asyncio.get_event_loop()
     main_task = None  # To hold the main task
 
