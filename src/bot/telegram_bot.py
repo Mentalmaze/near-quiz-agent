@@ -29,6 +29,7 @@ class TelegramBot:
         webhook_listen_ip: str = None,
         webhook_port: int = None,
         webhook_url_path: str = None,
+        certificate_path: str = None,
     ):
         # Build the Telegram application with increased connection timeout and retry settings
         self.app = (
@@ -48,6 +49,8 @@ class TelegramBot:
         self.webhook_listen_ip = webhook_listen_ip
         self.webhook_port = webhook_port
         self.webhook_url_path = webhook_url_path
+        self.certificate_path = certificate_path
+
         self._stop_signal = asyncio.Future()  # For graceful shutdown signal
 
     @staticmethod
@@ -237,6 +240,14 @@ class TelegramBot:
 
             # REMOVED: await self.app.bot.set_webhook(...) - updater.start_webhook will handle this.
 
+        certificate = None
+        if self.certificate_path:
+            try:
+                with open(self.certificate_path, "rb") as cert_file:
+                    certificate = cert_file.read()
+                logger.info(f"Loaded certificate from {self.certificate_path}")
+            except Exception as e:
+                logger.error(f"Failed to load certificate: {e}")
             # Start the webhook server
             await self.app.updater.start_webhook(
                 listen=self.webhook_listen_ip,
@@ -245,6 +256,7 @@ class TelegramBot:
                 webhook_url=self.webhook_url,
                 allowed_updates=allowed_updates_list,
                 drop_pending_updates=True,
+                certificate=certificate,
             )
             logger.info(
                 f"Webhook server set up to listen on {self.webhook_listen_ip}:{self.webhook_port} for path /{self.webhook_url_path} and registered with URL {self.webhook_url}/{self.webhook_url_path}"
