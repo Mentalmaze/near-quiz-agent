@@ -238,24 +238,58 @@ class TelegramBot:
                 f"Starting Telegram bot in WEBHOOK mode. Base URL: {self.webhook_url}, Path: {self.webhook_url_path}, Listen IP: {self.webhook_listen_ip}, Port: {self.webhook_port}"
             )
 
-            # REMOVED: await self.app.bot.set_webhook(...) - updater.start_webhook will handle this.
+            max_retries = 3
+            retry_delay = 5  # seconds
+            current_port = self.webhook_port
+            # Try to delete any existing webhook before setting a new one to prevent conflicts
+            try:
+                logger.info("Removing any existing webhook...")
+                await self.app.bot.delete_webhook(drop_pending_updates=True)
+            except Exception as e:
+                logger.warning(f"Failed to delete existing webhook: {e}")
 
-            # Start the webhook server
-            await self.app.updater.start_webhook(
-                listen=self.webhook_listen_ip,
-                port=self.webhook_port,
-                # url_path=self.webhook_url_path,  # Let PTB default this to bot.token
-                webhook_url=self.webhook_url,
-                allowed_updates=allowed_updates_list,
-                drop_pending_updates=True,
-                cert=self.certificate_path,
-            )
-            logger.info(
-                f"Webhook server set up to listen on {self.webhook_listen_ip}:{self.webhook_port} for path /{self.webhook_url_path} and registered with URL {self.webhook_url}/{self.webhook_url_path}"
-            )
+            # Start the webhook server with retry logic for port binding
+            for retry in range(max_retries):
+                try:
+                    logger.info(
+                        f"Attempt {retry + 1}/{max_retries} to start webhook on port {current_port}"
+                    )
+                    await self.app.updater.start_webhook(
+                        listen=self.webhook_listen_ip,
+                        port=current_port,
+                        # url_path=self.webhook_url_path,  # Let PTB default this to bot.token
+                        webhook_url=self.webhook_url,
+                        allowed_updates=allowed_updates_list,
+                        drop_pending_updates=True,
+                        cert=self.certificate_path,
+                    )
+                    logger.info(
+                        f"Webhook server set up to listen on {self.webhook_listen_ip}:{current_port} for path /{self.webhook_url_path} and registered with URL {self.webhook_url}/{self.webhook_url_path}"
+                    )
+                    # Success! Break out of retry loop
+                    break
+                except OSError as e:
+                    if e.errno == 98:  # Address already in use
+                        current_port = current_port + 1
+                        logger.warning(
+                            f"Port {current_port - 1} is already in use. Trying port {current_port}..."
+                        )
+                        if retry == max_retries - 1:
+                            # This was our last retry
+                            logger.error(
+                                f"All ports in range {self.webhook_port} to {current_port} are in use."
+                            )
+                            raise
+                        await asyncio.sleep(retry_delay)
+                    else:
+                        # Some other OSError occurred
+                        logger.error(f"OSError when starting webhook: {e}")
+                        raise
+                except Exception as e:
+                    logger.error(f"Failed to start webhook: {e}", exc_info=True)
+                    raise
+
             # Since start_webhook is blocking, the bot will run until updater.stop() is called.
-            # The _stop_signal might not be directly awaited here if start_webhook blocks.
-            # It will be used by the stop() method to signal shutdown.
             try:
                 await self._stop_signal  # This will block until stop() is called
             except asyncio.CancelledError:
