@@ -58,6 +58,7 @@ async def main():
             webhook_listen_ip=webhook_listen_ip,  # IP address to listen on (e.g., 0.0.0.0)
             webhook_port=webhook_port,  # Port to listen on (e.g., 8443)
             webhook_url_path=webhook_url_path,  # Path for the webhook (e.g., /your-bot-token)
+            certificate_path=certificate_path
         )
     else:
         logger.info(
