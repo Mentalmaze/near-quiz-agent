@@ -47,7 +47,7 @@ async def main():
             Config, "WEBHOOK_URL_PATH", None
         )  # Get value from Config, could be None
         webhook_url_path = config_url_path if config_url_path else Config.TELEGRAM_TOKEN
-
+        certificate_path = getattr(Config, "CERTIFICATE_PATH", None)
         logger.info(
             f"Initializing bot in WEBHOOK mode. URL: {Config.WEBHOOK_URL}, Port: {webhook_port}"
         )
