@@ -18,7 +18,8 @@ class Config:
     WEBHOOK_URL_PATH = os.getenv(
         "WEBHOOK_URL_PATH"
     )  # Path for the webhook, defaults to TELEGRAM_TOKEN in main.py if not set
-    CERTIFICATE_PATH = os.getenv("SSL_CERT_PATH")
+    SSL_CERT_PATH = os.getenv("SSL_CERT_PATH")
+    SSL_PRIVATE_KEY_PATH = os.getenv("SSL_PRIVATE_KEY_PATH")
     # Gemini API for quiz generation
     GOOGLE_API_KEY = os.getenv("GOOGLE_GEMINI_API_KEY")
 
