@@ -252,6 +252,12 @@ class TelegramBot:
             # Since start_webhook is blocking, the bot will run until updater.stop() is called.
             # The _stop_signal might not be directly awaited here if start_webhook blocks.
             # It will be used by the stop() method to signal shutdown.
+            try:
+                await self._stop_signal  # This will block until stop() is called
+            except asyncio.CancelledError:
+                logger.info("Webhook stop signal received via CancelledError.")
+            finally:
+                logger.info("Webhook event loop part ended.")
         else:
             logger.info("Starting Telegram bot in POLLING mode.")
             await self.app.updater.start_polling(
