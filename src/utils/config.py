@@ -11,6 +11,13 @@ ENVIRONMENT = os.getenv("ENVIRONMENT", "development").lower()
 class Config:
     # Telegram Bot Configuration
     TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+    # Webhook Configuration (optional, if not set, polling is used)
+    WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g., https://yourdomain.com or ngrok URL
+    WEBHOOK_LISTEN_IP = os.getenv("WEBHOOK_LISTEN_IP", "0.0.0.0")  # IP to listen on
+    WEBHOOK_PORT = os.getenv("WEBHOOK_PORT", "8443")  # Port to listen on
+    WEBHOOK_URL_PATH = os.getenv(
+        "WEBHOOK_URL_PATH"
+    )  # Path for the webhook, defaults to TELEGRAM_TOKEN in main.py if not set
 
     # Gemini API for quiz generation
     GOOGLE_API_KEY = os.getenv("GOOGLE_GEMINI_API_KEY")
