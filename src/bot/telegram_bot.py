@@ -241,8 +241,8 @@ class TelegramBot:
             await self.app.updater.start_webhook(
                 listen=self.webhook_listen_ip,
                 port=self.webhook_port,
-                url_path=self.webhook_url_path,  # This is just the path component
-                webhook_url=self.webhook_url,  # ADDED: Pass the full base webhook URL
+                # url_path=self.webhook_url_path,  # Let PTB default this to bot.token
+                webhook_url=self.webhook_url,
                 allowed_updates=allowed_updates_list,
                 drop_pending_updates=True,
             )

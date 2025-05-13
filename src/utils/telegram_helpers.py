@@ -3,6 +3,7 @@
 import asyncio
 import functools
 import logging
+import re
 from typing import Callable, Any, Optional
 from telegram.error import TimedOut, NetworkError, RetryAfter, TelegramError, BadRequest
 
@@ -77,6 +78,63 @@ def with_telegram_retry(
     return decorator
 
 
+def sanitize_markdown(text: str) -> str:
+    """
+    Sanitize text to prevent markdown parsing errors.
+    Escapes special markdown characters that aren't part of valid formatting.
+    """
+    # If the text doesn't contain any markdown indicators, return as is
+    if not any(char in text for char in ["*", "_", "`", "["]):
+        return text
+
+    # Find valid markdown patterns
+    patterns = {
+        "bold": r"\*\*.*?\*\*",
+        "italic": r"_.*?_",
+        "code": r"`.*?`",
+        "link": r"\[.*?\]\(.*?\)",
+    }
+
+    # Replace valid markdown patterns with placeholders
+    replacements = []
+    for i, (style, pattern) in enumerate(patterns.items()):
+        matches = re.finditer(pattern, text)
+        for match in matches:
+            placeholder = f"__MARKDOWN_{i}_{len(replacements)}__"
+            replacements.append((placeholder, match.group(0)))
+            text = text[: match.start()] + placeholder + text[match.end() :]
+
+    # Escape remaining special characters
+    special_chars = [
+        "*",
+        "_",
+        "`",
+        "[",
+        "]",
+        "(",
+        ")",
+        "~",
+        ">",
+        "#",
+        "+",
+        "-",
+        "=",
+        "|",
+        "{",
+        "}",
+        ".",
+        "!",
+    ]
+    for char in special_chars:
+        text = text.replace(char, "\\" + char)
+
+    # Restore valid markdown
+    for placeholder, original in replacements:
+        text = text.replace(placeholder, original)
+
+    return text
+
+
 async def safe_send_message(bot, chat_id, text, **kwargs):
     """
     Safely send a message with proper error handling.
@@ -90,12 +148,28 @@ async def safe_send_message(bot, chat_id, text, **kwargs):
     Returns:
         The Message object or None if failed
     """
+    # If parse_mode is specified, sanitize the text accordingly
+    parse_mode = kwargs.get("parse_mode", None)
+    if parse_mode and parse_mode.lower() == "markdown":
+        text = sanitize_markdown(text)
+
     try:
         return await with_telegram_retry()(bot.send_message)(
             chat_id=chat_id, text=text, **kwargs
         )
     except BadRequest as e:
-        if "chat not found" in str(e).lower() or "user not found" in str(e).lower():
+        if "can't parse entities" in str(e).lower():
+            logger.warning(f"Entity parsing error, retrying without formatting: {e}")
+            # Try sending without any parsing mode
+            kwargs.pop("parse_mode", None)
+            try:
+                return await with_telegram_retry()(bot.send_message)(
+                    chat_id=chat_id, text=text, **kwargs
+                )
+            except BadRequest as e2:
+                logger.error(f"Failed to send message even without formatting: {e2}")
+                return None
+        elif "chat not found" in str(e).lower() or "user not found" in str(e).lower():
             logger.warning(f"Cannot send message to {chat_id}: user/chat not found")
         else:
             logger.error(f"Bad request when sending message to {chat_id}: {e}")
