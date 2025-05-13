@@ -232,30 +232,22 @@ class TelegramBot:
             and self.webhook_url_path
         ):
             logger.info(
-                f"Starting Telegram bot in WEBHOOK mode. URL: {self.webhook_url}/{self.webhook_url_path}, Listen IP: {self.webhook_listen_ip}, Port: {self.webhook_port}"
+                f"Starting Telegram bot in WEBHOOK mode. Base URL: {self.webhook_url}, Path: {self.webhook_url_path}, Listen IP: {self.webhook_listen_ip}, Port: {self.webhook_port}"
             )
 
-            # Set the webhook
-            await self.app.bot.set_webhook(
-                url=f"{self.webhook_url}/{self.webhook_url_path}",
-                allowed_updates=allowed_updates_list,
-                drop_pending_updates=True,
-            )
+            # REMOVED: await self.app.bot.set_webhook(...) - updater.start_webhook will handle this.
 
             # Start the webhook server
-            # start_webhook is blocking, so it should be the last thing called in this branch
-            # or run in a way that doesn't block the main thread if other async tasks need to run concurrently
-            # For this structure, it's assumed main.py handles the overall asyncio loop management.
-            # The `application.run_webhook` or `updater.start_webhook` are typically blocking.
             await self.app.updater.start_webhook(
                 listen=self.webhook_listen_ip,
                 port=self.webhook_port,
-                url_path=self.webhook_url_path,
+                url_path=self.webhook_url_path,  # This is just the path component
+                webhook_url=self.webhook_url,  # ADDED: Pass the full base webhook URL
                 allowed_updates=allowed_updates_list,
                 drop_pending_updates=True,
             )
             logger.info(
-                f"Webhook server listening on {self.webhook_listen_ip}:{self.webhook_port} with path /{self.webhook_url_path}"
+                f"Webhook server set up to listen on {self.webhook_listen_ip}:{self.webhook_port} for path /{self.webhook_url_path} and registered with URL {self.webhook_url}/{self.webhook_url_path}"
             )
             # Since start_webhook is blocking, the bot will run until updater.stop() is called.
             # The _stop_signal might not be directly awaited here if start_webhook blocks.

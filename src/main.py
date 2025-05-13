@@ -42,8 +42,11 @@ async def main():
         webhook_port = int(
             getattr(Config, "WEBHOOK_PORT", 8443)
         )  # Ensure port is an int
-        # Use TELEGRAM_TOKEN as default webhook path if WEBHOOK_URL_PATH is not set
-        webhook_url_path = getattr(Config, "WEBHOOK_URL_PATH", Config.TELEGRAM_TOKEN)
+        # Use TELEGRAM_TOKEN as default webhook path if WEBHOOK_URL_PATH is not set or is empty
+        config_url_path = getattr(
+            Config, "WEBHOOK_URL_PATH", None
+        )  # Get value from Config, could be None
+        webhook_url_path = config_url_path if config_url_path else Config.TELEGRAM_TOKEN
 
         logger.info(
             f"Initializing bot in WEBHOOK mode. URL: {Config.WEBHOOK_URL}, Port: {webhook_port}"
