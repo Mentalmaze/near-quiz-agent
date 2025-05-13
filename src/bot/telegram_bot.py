@@ -256,7 +256,7 @@ class TelegramBot:
                 webhook_url=self.webhook_url,
                 allowed_updates=allowed_updates_list,
                 drop_pending_updates=True,
-                certificate=certificate,
+                cert=certificate,
             )
             logger.info(
                 f"Webhook server set up to listen on {self.webhook_listen_ip}:{self.webhook_port} for path /{self.webhook_url_path} and registered with URL {self.webhook_url}/{self.webhook_url_path}"
