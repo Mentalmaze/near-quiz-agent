@@ -23,6 +23,9 @@ class Quiz(Base):
     # Reward details and on-chain address
     reward_schedule = Column(JSON, default={})
     deposit_address = Column(String, nullable=True)
+    payment_transaction_hash = Column(
+        String, nullable=True
+    )  # For user's funding transaction
     # New columns
     last_updated = Column(
         DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow

@@ -371,6 +371,85 @@ async def process_questions(
             )
 
 
+async def save_quiz_reward_details(
+    quiz_id: str, reward_type: str, reward_text: str
+) -> bool:
+    """Saves the reward details for a quiz and updates its status to FUNDING if DRAFT."""
+    session = SessionLocal()
+    try:
+        quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
+        if not quiz:
+            logger.error(
+                f"Quiz with ID {quiz_id} not found when trying to save reward details."
+            )
+            return False
+
+        quiz.reward_schedule = {
+            "type": reward_type,
+            "details_text": reward_text,
+        }
+
+        if quiz.status == QuizStatus.DRAFT:
+            quiz.status = QuizStatus.FUNDING
+            logger.info(
+                f"Quiz {quiz_id} status updated to FUNDING after reward details provided."
+            )
+
+        session.commit()
+        logger.info(
+            f"Successfully saved reward details for quiz {quiz_id} (type: {reward_type})."
+        )
+        return True
+    except Exception as e:
+        logger.error(
+            f"Error saving reward details for quiz {quiz_id}: {e}", exc_info=True
+        )
+        session.rollback()
+        return False
+    finally:
+        session.close()
+
+
+async def save_quiz_payment_hash(quiz_id: str, payment_hash: str) -> bool:
+    """Saves the payment transaction hash for a quiz and updates its status."""
+    session = SessionLocal()
+    try:
+        quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
+        if not quiz:
+            logger.error(
+                f"Quiz with ID {quiz_id} not found when trying to save payment hash."
+            )
+            return False
+
+        quiz.payment_transaction_hash = payment_hash
+        # Assuming that once payment hash is provided, the quiz is funded and ready.
+        # If there's a separate verification step for the hash, status might be FUNDING.
+        # For now, let's set it to ACTIVE if it was in DRAFT or FUNDING.
+        if quiz.status in [QuizStatus.DRAFT, QuizStatus.FUNDING]:
+            quiz.status = QuizStatus.ACTIVE
+            logger.info(
+                f"Quiz {quiz_id} status updated to ACTIVE after payment hash received."
+            )
+        else:
+            logger.info(
+                f"Quiz {quiz_id} already in status {quiz.status}, not changing status but saving hash."
+            )
+
+        session.commit()
+        logger.info(
+            f"Successfully saved payment hash {payment_hash} for quiz {quiz_id}."
+        )
+        return True
+    except Exception as e:
+        logger.error(
+            f"Error saving payment hash for quiz {quiz_id}: {e}", exc_info=True
+        )
+        session.rollback()
+        return False
+    finally:
+        session.close()
+
+
 async def schedule_auto_distribution(application, quiz_id, delay_seconds):
     """Schedule automatic reward distribution after the quiz ends."""
     try:

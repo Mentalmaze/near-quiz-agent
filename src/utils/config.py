@@ -43,6 +43,9 @@ class Config:
         ),
     )
 
+    # Address for users to deposit funds for quiz rewards
+    DEPOSIT_ADDRESS = os.getenv("NEAR_WALLET_ADDRESS", "kindpuma8958.testnet")
+
     # Quiz Configuration
     DEFAULT_QUIZ_QUESTIONS = 1
     MAX_QUIZ_QUESTIONS = 5

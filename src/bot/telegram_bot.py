@@ -114,6 +114,8 @@ class TelegramBot:
             private_message_handler,
             winners_handler,
             distribute_rewards_handler,
+            start_reward_setup_callback,  # Import new reward setup handlers
+            handle_reward_method_choice,
         )
 
         # Conversation for interactive quiz creation needs to be registered FIRST
@@ -185,6 +187,17 @@ class TelegramBot:
 
         # Handle confirmation callbacks globally to catch any that might be missed by the conversation handler
         self.app.add_handler(CallbackQueryHandler(confirm_choice, pattern="^(yes|no)$"))
+
+        # Handle reward setup initiation callback
+        self.app.add_handler(
+            CallbackQueryHandler(
+                start_reward_setup_callback, pattern="^reward_setup_start:"
+            )
+        )
+        # Handle reward method choices
+        self.app.add_handler(
+            CallbackQueryHandler(handle_reward_method_choice, pattern="^reward_method:")
+        )
 
         # THEN register other command handlers
         logger.info("Registering command handlers")
