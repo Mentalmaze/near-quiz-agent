@@ -108,6 +108,7 @@ class TelegramBot:
             DURATION_INPUT,
             CONFIRM,
             link_wallet_handler,
+            unlink_wallet_handler,  # Add import for the new handler
             play_quiz_handler,
             quiz_answer_handler,
             private_message_handler,
@@ -188,6 +189,9 @@ class TelegramBot:
         # THEN register other command handlers
         logger.info("Registering command handlers")
         self.app.add_handler(CommandHandler("linkwallet", link_wallet_handler))
+        self.app.add_handler(
+            CommandHandler("unlinkwallet", unlink_wallet_handler)
+        )  # Register the new handler
         self.app.add_handler(CommandHandler("playquiz", play_quiz_handler))
         self.app.add_handler(CommandHandler("winners", winners_handler))
         self.app.add_handler(

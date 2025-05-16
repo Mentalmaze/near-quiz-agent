@@ -17,9 +17,14 @@ from services.quiz_service import (
     process_questions,
     schedule_auto_distribution,
 )
-from services.user_service import link_wallet
+from services.user_service import (
+    get_user_wallet,
+    set_user_wallet,
+    remove_user_wallet,
+)  # Updated imports
 from agent import generate_quiz
 import logging
+import re  # Import re for duration_input and potentially wallet validation
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -189,8 +194,6 @@ async def duration_input(update, context):
     logger.debug(f"User data for {user_id} at duration_input: {context.user_data}")
     txt = message_text.strip().lower()
     # simple parse
-    import re
-
     m = re.match(r"(\d+)\s*(minute|hour|min)s?", txt)
     if m:
         val = int(m.group(1))
@@ -294,7 +297,73 @@ async def create_quiz_handler(update: Update, context: CallbackContext):
 
 async def link_wallet_handler(update: Update, context: CallbackContext):
     """Handler for /linkwallet command."""
-    await link_wallet(update, context)
+    user = update.effective_user
+    if not user:
+        await update.message.reply_text("Could not identify user.")
+        return
+
+    user_id = user.id
+
+    # Check if wallet is already linked
+    # This assumes get_user_wallet returns the wallet address if linked, or None otherwise
+    existing_wallet = await get_user_wallet(user_id)
+    if existing_wallet:
+        await update.message.reply_text(
+            f"You have already linked the wallet: `{existing_wallet}`.\n"
+            "If you want to link a new wallet, please use /unlinkwallet first."
+        )
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Please provide your wallet address after the command.\n"
+            "Example: `/linkwallet yourwallet.near`"
+        )
+        return
+
+    wallet_address = context.args[0].strip()
+
+    # Basic validation (you might want to make this more robust)
+    if not (wallet_address.endswith(".near") or wallet_address.endswith(".testnet")):
+        await update.message.reply_text(
+            "Invalid wallet address format. Please provide a valid .near or .testnet address."
+        )
+        return
+
+    # This assumes set_user_wallet returns True on success, False on failure
+    if await set_user_wallet(user_id, wallet_address):
+        await update.message.reply_text(
+            f"✅ Wallet `{wallet_address}` linked successfully!"
+        )
+    else:
+        await update.message.reply_text(
+            "⚠️ Failed to link your wallet. Please try again or contact support."
+        )
+
+
+async def unlink_wallet_handler(update: Update, context: CallbackContext):
+    """Handler for /unlinkwallet command."""
+    user = update.effective_user
+    if not user:
+        await update.message.reply_text("Could not identify user.")
+        return
+
+    user_id = user.id
+
+    existing_wallet = await get_user_wallet(user_id)
+    if not existing_wallet:
+        await update.message.reply_text("You do not have any wallet linked.")
+        return
+
+    # This assumes remove_user_wallet returns True on success, False on failure
+    if await remove_user_wallet(user_id):
+        await update.message.reply_text(
+            f"✅ Your wallet `{existing_wallet}` has been unlinked successfully."
+        )
+    else:
+        await update.message.reply_text(
+            "⚠️ Failed to unlink your wallet. Please try again or contact support."
+        )
 
 
 async def play_quiz_handler(update: Update, context: CallbackContext):
@@ -340,8 +409,6 @@ async def private_message_handler(update: Update, context: CallbackContext):
 
         # Parse duration input
         txt = message_text.strip().lower()
-        import re
-
         m = re.match(r"(\d+)\s*(minute|hour|min)s?", txt)
         if m:
             val = int(m.group(1))

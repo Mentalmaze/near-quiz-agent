@@ -101,3 +101,59 @@ async def check_wallet_linked(user_id: str) -> bool:
     except Exception as e:
         logger.error(f"Error checking wallet linkage: {e}", exc_info=True)
         return False  # Safer to return False in case of error
+
+
+async def get_user_wallet(user_id: str) -> str | None:
+    """Retrieve the wallet address for a given user_id."""
+    session = SessionLocal()
+    try:
+        user = session.query(User).filter(User.id == str(user_id)).first()
+        if user and user.wallet_address:
+            return user.wallet_address
+        return None
+    except Exception as e:
+        logger.error(f"Error getting user wallet for {user_id}: {e}", exc_info=True)
+        return None
+    finally:
+        session.close()
+
+
+async def set_user_wallet(user_id: str, wallet_address: str) -> bool:
+    """Set or update the wallet address for a given user_id."""
+    session = SessionLocal()
+    try:
+        user = session.query(User).filter(User.id == str(user_id)).first()
+        if not user:
+            user = User(id=str(user_id), wallet_address=wallet_address)
+            session.add(user)
+        else:
+            user.wallet_address = wallet_address
+        session.commit()
+        return True
+    except Exception as e:
+        logger.error(f"Error setting user wallet for {user_id}: {e}", exc_info=True)
+        session.rollback()
+        return False
+    finally:
+        session.close()
+
+
+async def remove_user_wallet(user_id: str) -> bool:
+    """Remove the wallet address for a given user_id."""
+    session = SessionLocal()
+    try:
+        user = session.query(User).filter(User.id == str(user_id)).first()
+        if user and user.wallet_address:
+            user.wallet_address = None
+            session.commit()
+            return True
+        elif not user or not user.wallet_address:
+            # If user doesn't exist or no wallet is linked, consider it a success (idempotency)
+            return True
+        return False  # Should not be reached if logic is correct
+    except Exception as e:
+        logger.error(f"Error removing user wallet for {user_id}: {e}", exc_info=True)
+        session.rollback()
+        return False
+    finally:
+        session.close()
