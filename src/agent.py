@@ -23,7 +23,9 @@ async def generate_quiz(
     """
     Generate a multiple-choice quiz about a topic.
     """
-    llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", api_key=GOOGLE_API_KEY)
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-2.0-flash", api_key=GOOGLE_API_KEY, temperature=0.75
+    )  # Added temperature
 
     # Preprocess context
     if context_text:
@@ -31,10 +33,13 @@ async def generate_quiz(
 
     # Unified, meta-prompt with few-shot and robust instructions
     BASIC_SYSTEM = """
-You are QuizMasterGPT, an expert educator and fact-checker.\nAlways produce unique, non-repetitive, evidence-based multiple-choice questions.\n"""
+You are QuizMasterGPT, an expert educator and fact-checker.
+Your primary goal is to produce unique, non-repetitive, evidence-based multiple-choice questions.
+Each question should explore a different facet or sub-topic of the main theme.
+"""
 
     FEW_SHOT = """
-Example 1:
+Example 1 (Definition):
 Question: What is the primary consensus mechanism used by the Bitcoin network?
 A) Proof of Stake
 B) Proof of Work
@@ -42,16 +47,16 @@ C) Delegated Proof of Stake
 D) Proof of Authority
 Correct Answer: B
 
-Example 2:
-Question: In object-oriented programming, which keyword in JavaScript defines a class?
-A) class
+Example 2 (Application/Concept):
+Question: In object-oriented programming, which keyword in JavaScript is fundamental for creating an instance of a class?
+A) new
 B) constructor
-C) func
-D) type
+C) this
+D) class
 Correct Answer: A
 
-Example 3:
-Question: What is the native token of the Solana blockchain?
+Example 3 (Specific Detail):
+Question: What is the native token of the Solana blockchain, used for transaction fees and staking?
 A) SOL
 B) SLP
 C) SOLA
@@ -62,33 +67,42 @@ Correct Answer: A
     TEMPLATE = """
 {few_shot}
 
-Now, generate {num_questions} multiple-choice question(s) exclusively about **{topic}**.
+Now, generate {num_questions} distinct multiple-choice question(s) exclusively about **{topic}**.
 
-Context: {context}
+Context (use if relevant, otherwise rely on general knowledge about the topic):
+{context}
 
 Strict requirements:
- 1. Focus solely on the user-provided topic; do NOT include content outside the scope of {topic}.
- 2. EXACTLY four options per question, labeled A)–D). Only one correct answer; state “Correct Answer: [letter]” after each.
- 3. No repetition: each question must cover a distinct subtopic (e.g., tokenomics, consensus mechanism, network performance, smart contracts, ecosystem governance).
- 4. Avoid any hallucinations: only use verifiable facts. If uncertain, choose a general concept rather than invent details.
- 5. Vary question types: definition, application, true/false style, edge-case analysis.
- 6. Use concise, precise language suitable for advanced learners.
- 7. If the topic is blockchain-related, ensure all blockchain-specific facts are accurate.
- 8. Do NOT include any additional commentary or instructions; output only the formatted questions.
- 9. Number each question: 1., 2., …
+ 1. Focus solely on the user-provided topic: **{topic}**. Do NOT include content outside this scope.
+ 2. Each question MUST cover a different sub-topic or explore a unique angle of **{topic}**. Avoid asking multiple questions about the exact same detail or concept.
+ 3. Generate EXACTLY four options per question, labeled A) to D).
+ 4. Ensure only ONE option is correct. State the correct answer clearly as "Correct Answer: [letter]" on a new line immediately after the options for each question.
+ 5. No repetition of questions or options. All generated content must be original for this request.
+ 6. Avoid hallucinations: only use verifiable facts. If uncertain about a specific detail, ask a more general question about the topic.
+ 7. Vary question types. Aim for a mix of:
+    - Definitions (e.g., "What is X?")
+    - Purpose/Use (e.g., "What is X used for?")
+    - Comparisons (e.g., "How does X differ from Y?")
+    - Components (e.g., "Which of these is a key part of X?")
+    - Characteristics (e.g., "What is a primary characteristic of X?")
+ 8. Use concise, precise language suitable for advanced learners.
+ 9. If the topic is blockchain-related, ensure all blockchain-specific facts are accurate and up-to-date.
+10. Do NOT include any additional commentary, preamble, or instructions in your output. Output only the formatted questions.
+11. Number each question sequentially (e.g., 1., 2., ...).
 
-Format exactly like the examples above.
+Format each question exactly like the examples provided (Question, Options A-D, Correct Answer).
 """
 
     prompt = ChatPromptTemplate.from_template(
-        BASIC_SYSTEM + "\n" + FEW_SHOT + "\n" + TEMPLATE
+        BASIC_SYSTEM + "\n" + TEMPLATE  # FEW_SHOT is now part of the main TEMPLATE
     )
 
     messages = prompt.format_messages(
-        few_shot=FEW_SHOT,
+        few_shot=FEW_SHOT,  # Pass it here so it's correctly inserted into the TEMPLATE
         topic=topic,
         num_questions=num_questions,
-        context=context_text or "No additional context provided.",
+        context=context_text
+        or "No additional context provided. Rely on general knowledge for the topic.",
     )
 
     # Remaining generation & retry logic unchanged...
