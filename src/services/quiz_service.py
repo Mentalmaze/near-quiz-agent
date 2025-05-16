@@ -321,22 +321,39 @@ async def process_questions(
 
     await safe_send_message(
         context.bot,
-        update.effective_chat.id,
+        update.effective_chat.id,  # This is the group chat or DM where /createquiz was used
         f"Quiz created with ID: {quiz_id}! {num_questions} question(s) about {topic}{duration_info}.\n"
-        f"Check your DMs to set up the reward contract.",
+        f"The quiz creator, @{update.effective_user.username}, will be prompted to set up rewards.",
     )
 
-    # DM the creator for reward structure details
+    # DM the creator to start reward setup
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "💰 Setup Rewards", callback_data=f"reward_setup_start:{quiz_id}"
+            )
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
     await safe_send_message(
         context.bot,
         update.effective_user.id,
-        "Please specify the reward structure in this private chat (e.g., '2 Near for 1st, 1 Near for 2nd').",
+        f"Your quiz '{topic}' (ID: {quiz_id}) has been created!\n"
+        "Please set up the reward structure for the winners.",
+        reply_markup=reply_markup,
     )
 
-    # Set the awaiting flags correctly for both formats
-    context.user_data["awaiting"] = "reward_structure"
-    context.user_data["awaiting_reward_quiz_id"] = quiz_id
-    logger.info(f"Set awaiting flag for reward structure for quiz ID: {quiz_id}")
+    # Remove old awaiting flags if they exist, not strictly necessary here
+    # as the new flow will be initiated by the button.
+    if "awaiting" in context.user_data:
+        del context.user_data["awaiting"]
+    if "awaiting_reward_quiz_id" in context.user_data:
+        del context.user_data["awaiting_reward_quiz_id"]
+
+    logger.info(
+        f"Sent reward setup prompt for quiz ID: {quiz_id} to user {update.effective_user.id}"
+    )
 
     # If quiz has an end time, schedule auto distribution task
     if end_time:
