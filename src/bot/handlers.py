@@ -79,8 +79,8 @@ def _parse_reward_details_for_total(
 
     try:
         if reward_type == "wta_amount":
-            # e.g., "5 NEAR", "10.5 USDT"
-            match = re.search(r"(\d+\.?\d*)\s*([a-zA-Z]+)", reward_text)
+            # e.g., "5 NEAR", "10.5 USDT" (currency must be 3+ letters to avoid ordinal suffixes)
+            match = re.search(r"(\d+\.?\d*)\s*([A-Za-z]{3,})\b", reward_text)
             if match:
                 total_amount = float(match.group(1))
                 currency = match.group(2).upper()
@@ -88,8 +88,8 @@ def _parse_reward_details_for_total(
             return None, None
 
         elif reward_type == "top3_details":
-            # e.g., "3 NEAR for 1st, 2 NEAR for 2nd, 1 NEAR for 3rd"
-            matches = re.findall(r"(\d+\.?\d*)\s*([a-zA-Z]+)", reward_text)
+            # e.g., "3 NEAR for 1st, 2 NEAR for 2nd, 1 NEAR for 3rd" (ignore ordinal suffixes)
+            matches = re.findall(r"(\d+\.?\d*)\s*([A-Za-z]{3,})\b", reward_text)
             if not matches:
                 return None, None
 
@@ -105,8 +105,8 @@ def _parse_reward_details_for_total(
             return total_amount, currency
 
         elif reward_type == "custom_details":
-            # Basic sum for custom_details, sums all "X CURRENCY" found if currency is consistent.
-            matches = re.findall(r"(\d+\.?\d*)\s*([a-zA-Z]+)", reward_text)
+            # Basic sum for custom_details, sums all "X CURRENCY" found if currency is consistent (ignore ordinals)
+            matches = re.findall(r"(\d+\.?\d*)\s*([A-Za-z]{3,})\b", reward_text)
             if not matches:
                 return None, None
 
@@ -718,7 +718,7 @@ async def private_message_handler(update: Update, context: CallbackContext):
                 )
                 await asyncio.wait_for(
                     update.message.reply_text(
-                        text=deposit_instructions, parse_mode="MarkdownV2"
+                        text=deposit_instructions, parse_mode="Markdown"
                     ),
                     timeout=30.0,  # Increased timeout
                 )
