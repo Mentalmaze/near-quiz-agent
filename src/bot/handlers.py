@@ -676,7 +676,7 @@ async def private_message_handler(update: Update, context: CallbackContext):
                 friendly_method_name = "manually entered reward text"
 
             reward_confirmation_content = (
-                f"✅ Got it! I've noted down {friendly_method_name} as: '{_escape_markdown_v2_specials(message_text)}' for Quiz ID {quiz_id_for_setup}.\\n"
+                f"✅ Got it! I've noted down {friendly_method_name} as: '{_escape_markdown_v2_specials(message_text)}' for Quiz ID {quiz_id_for_setup}.\n"
                 f"The rewards for this quiz are now set up."
             )
             logger.info(
@@ -691,14 +691,14 @@ async def private_message_handler(update: Update, context: CallbackContext):
 
             if total_amount is not None and currency:
                 deposit_instructions = (
-                    f"💰 Please deposit *{_escape_markdown_v2_specials(str(total_amount))} {_escape_markdown_v2_specials(currency)}* "
-                    f"to the following address to fund the quiz: `{_escape_markdown_v2_specials(Config.DEPOSIT_ADDRESS)}`\\n\\n"
+                    f"💰 Please deposit *{total_amount} {currency}* "
+                    f"to the following address to fund the quiz: `{Config.DEPOSIT_ADDRESS}`\n\n"
                     f"Once sent, please reply with the *transaction hash*."
                 )
             else:
                 deposit_instructions = (
                     f"⚠️ I couldn't automatically determine the total amount/currency from your input. "
-                    f"Please ensure you deposit the correct total amount to fund the quiz to `{_escape_markdown_v2_specials(Config.DEPOSIT_ADDRESS)}`.\\n\\n"
+                    f"Please ensure you deposit the correct total amount to fund the quiz to `{Config.DEPOSIT_ADDRESS}`.\n\n"
                     f"Once sent, please reply with the *transaction hash*."
                 )
             logger.info(f"Deposit instructions prepared: {deposit_instructions}")
