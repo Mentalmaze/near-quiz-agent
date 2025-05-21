@@ -208,12 +208,14 @@ class TelegramBot:
         )  # Register the new handler
         self.app.add_handler(CommandHandler("playquiz", play_quiz_handler))
         self.app.add_handler(CommandHandler("winners", winners_handler))
-        self.app.add_handler(
-            CommandHandler("distributerewards", distribute_rewards_handler)
-        )
+        # self.app.add_handler(
+        #     CommandHandler("distributerewards", distribute_rewards_handler)
+        # )
 
         # Handle callback queries for quiz answers
-        self.app.add_handler(CallbackQueryHandler(quiz_answer_handler))
+        self.app.add_handler(
+            CallbackQueryHandler(quiz_answer_handler, pattern=r"^quiz:")
+        )
 
         # New: handle quiz selection callback when multiple quizzes are active in a group
         self.app.add_handler(

@@ -615,6 +615,10 @@ async def play_quiz_selection_callback(update: Update, context: CallbackContext)
     except ValueError:
         await query.edit_message_text("Invalid selection. Please try /playquiz again.")
         return
+    # Confirm selection to user
+    await query.edit_message_text(
+        f"✅ You selected Quiz {quiz_id}. Sending your quiz via DM..."
+    )
     # Set quiz_id for standard play_quiz handler
     context.args = [quiz_id]
     # Delegate to play_quiz logic
