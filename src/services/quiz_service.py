@@ -259,10 +259,12 @@ async def process_questions(
     topic,
     questions_raw,
     group_chat_id,
-    duration_seconds: int | None = None, # Changed parameters
+    duration_seconds: int | None = None,  # Changed parameters
 ):
     """Process multiple questions from raw text and save them as a quiz."""
-    logger.info(f"Processing questions for topic: {topic} with duration_seconds: {duration_seconds}")
+    logger.info(
+        f"Processing questions for topic: {topic} with duration_seconds: {duration_seconds}"
+    )
 
     # Parse multiple questions
     questions_list = parse_multiple_questions(questions_raw)
@@ -280,10 +282,13 @@ async def process_questions(
     end_time = None
     if duration_seconds and duration_seconds > 0:
         end_time = datetime.utcnow() + timedelta(seconds=duration_seconds)
-        logger.info(f"Quiz end time calculated: {end_time} based on {duration_seconds} seconds.")
+        logger.info(
+            f"Quiz end time calculated: {end_time} based on {duration_seconds} seconds."
+        )
     else:
-        logger.info("No duration specified or duration is zero, quiz will not have an end time.")
-
+        logger.info(
+            "No duration specified or duration is zero, quiz will not have an end time."
+        )
 
     # Persist quiz with multiple questions
     session = SessionLocal()
@@ -309,7 +314,7 @@ async def process_questions(
     if duration_seconds and duration_seconds > 0:
         temp_duration = duration_seconds
         days = temp_duration // (24 * 3600)
-        temp_duration %= (24 * 3600)
+        temp_duration %= 24 * 3600
         hours = temp_duration // 3600
         temp_duration %= 3600
         minutes = temp_duration // 60
@@ -321,7 +326,9 @@ async def process_questions(
         if minutes > 0:
             duration_text_parts.append(f"{minutes} minute{'s' if minutes > 1 else ''}")
 
-    duration_info = f" (Active for {', '.join(duration_text_parts)})" if duration_text_parts else ""
+    duration_info = (
+        f" (Active for {', '.join(duration_text_parts)})" if duration_text_parts else ""
+    )
 
     await safe_send_message(
         context.bot,
@@ -669,10 +676,9 @@ async def play_quiz(update: Update, context: CallbackContext):
                 .filter(
                     Quiz.status == QuizStatus.ACTIVE,
                     Quiz.group_chat_id == group_chat_id,
-                    Quiz.end_time
-                    > datetime.utcnow(),  # Only quizzes that haven't ended
+                    Quiz.end_time > datetime.utcnow(),
                 )
-                .order_by(Quiz.end_time)  # Optional: order by soonest ending
+                .order_by(Quiz.end_time)
                 .all()
             )
             logger.info(
@@ -750,6 +756,22 @@ async def play_quiz(update: Update, context: CallbackContext):
                 context.bot,
                 update.effective_chat.id,
                 "Please specify a quiz ID to play (e.g., /playquiz <quiz_id>), or use /playquiz in a group with active quizzes.",
+            )
+            return
+
+        # Check if the user has already played this quiz
+        existing_answers = (
+            session.query(QuizAnswer)
+            .filter(
+                QuizAnswer.quiz_id == quiz_id_to_play, QuizAnswer.user_id == user_id
+            )
+            .first()
+        )
+        if existing_answers:
+            await safe_send_message(
+                context.bot,
+                update.effective_chat.id,
+                "You have already played this quiz. You cannot play it again.",
             )
             return
 
