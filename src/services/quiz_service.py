@@ -1025,6 +1025,25 @@ async def handle_transaction_hash(update: Update, context: CallbackContext):
             update.effective_chat.id,
             "✅ Transaction verified successfully! Your quiz is now active and ready to play.",
         )
+        # Announce activation to the original group chat
+        session = SessionLocal()
+        try:
+            quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
+            if quiz and quiz.group_chat_id:
+                total_reward = (
+                    sum(int(v) for v in quiz.reward_schedule.values())
+                    if quiz.reward_schedule
+                    else 0
+                )
+                await safe_send_message(
+                    context.bot,
+                    quiz.group_chat_id,
+                    f"📣 New quiz '{quiz.topic}' is now active! 🎯\n"
+                    f"Total rewards: {total_reward} NEAR\n"
+                    "Type /playquiz to participate!",
+                )
+        finally:
+            session.close()
     else:
         await safe_send_message(
             context.bot,

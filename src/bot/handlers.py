@@ -29,6 +29,8 @@ import re  # Import re for duration_input and potentially wallet validation
 import asyncio  # Add asyncio import
 from typing import Optional  # Added for type hinting
 from utils.config import Config  # Added to access DEPOSIT_ADDRESS
+from store.database import SessionLocal
+from models.quiz import Quiz
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -466,9 +468,6 @@ async def start_reward_setup_callback(update: Update, context: CallbackContext):
         text=f"Let's set up rewards for your quiz (ID: {quiz_id}). How would you like to do it?",
         reply_markup=reply_markup,
     )
-    # This could be the start of a new conversation or managed with user_data states
-    # For now, we'll handle the next step with separate callback handlers.
-    # If using ConversationHandler, this would return a new state.
     return  # Or a new state for a ConversationHandler
 
 
@@ -505,7 +504,6 @@ async def handle_reward_method_choice(update: Update, context: CallbackContext):
         )
     elif method == "manual":
         context.user_data["awaiting_reward_input_type"] = "manual_free_text"
-        # No longer setting legacy "awaiting" or "awaiting_reward_quiz_id"
         await query.edit_message_text(
             f"✍️ Manual Input selected for Quiz {quiz_id}.\nPlease type the reward structure (e.g., '2 Near for 1st, 1 Near for 2nd')."
         )
@@ -638,6 +636,47 @@ async def private_message_handler(update: Update, context: CallbackContext):
                 f"✅ Transaction hash '{payment_hash}' received and linked to Quiz ID {quiz_id_awaiting_hash}.\n"
                 "The quiz setup is now complete and funded!"
             )
+            # Announce quiz activation in the original group chat
+            session = SessionLocal()
+            try:
+                quiz = (
+                    session.query(Quiz).filter(Quiz.id == quiz_id_awaiting_hash).first()
+                )
+                if quiz and quiz.group_chat_id:
+                    # Tag everyone and announce quiz activation
+                    announce_text = "@all \n"
+                    announce_text += f"📣 New quiz '{quiz.topic}' is now active! 🎯\n"
+
+                    # Include reward structure if available
+                    schedule = quiz.reward_schedule or {}
+                    if schedule:
+                        reward_parts = []
+                        for rank_str, amt in schedule.items():
+                            try:
+                                rank = int(rank_str)
+                            except (ValueError, TypeError):
+                                rank = rank_str
+                            # simple ordinal
+                            suffix = {1: "st", 2: "nd", 3: "rd"}.get(rank, "th")
+                            reward_parts.append(f"{rank}{suffix}: {amt} NEAR")
+                        announce_text += "Rewards: " + ", ".join(reward_parts) + "\n"
+
+                    # Include end time if set
+                    if getattr(quiz, "end_time", None):
+                        # Format UTC end_time
+                        end_str = quiz.end_time.strftime("%Y-%m-%d %H:%M UTC")
+                        announce_text += f"Ends at: {end_str}\n"
+
+                    announce_text += "Type /playquiz to participate!"
+
+                    await context.bot.send_message(
+                        chat_id=quiz.group_chat_id,
+                        text=announce_text,
+                    )
+
+            finally:
+                session.close()
+
         else:
             await update.message.reply_text(
                 f"⚠️ There was an issue saving your transaction hash for Quiz ID {quiz_id_awaiting_hash}. "
