@@ -604,6 +604,25 @@ async def play_quiz_handler(update: Update, context: CallbackContext):
     await play_quiz(update, context)
 
 
+# Handle selection when multiple quizzes are active in a group
+async def play_quiz_selection_callback(update: Update, context: CallbackContext):
+    """Handles selection of a quiz when multiple active quizzes exist in a group"""
+    query = update.callback_query
+    await query.answer()
+    # Extract chosen quiz ID
+    try:
+        _, quiz_id = query.data.split(":", 1)
+    except ValueError:
+        await query.edit_message_text("Invalid selection. Please try /playquiz again.")
+        return
+    # Set quiz_id for standard play_quiz handler
+    context.args = [quiz_id]
+    # Delegate to play_quiz logic
+    from services.quiz_service import play_quiz
+
+    await play_quiz(update, context)
+
+
 async def quiz_answer_handler(update: Update, context: CallbackContext):
     """Handler for quiz answer callbacks."""
     if update.callback_query and update.callback_query.data.startswith("quiz:"):
@@ -643,7 +662,6 @@ async def private_message_handler(update: Update, context: CallbackContext):
                     session.query(Quiz).filter(Quiz.id == quiz_id_awaiting_hash).first()
                 )
                 if quiz and quiz.group_chat_id:
-                    # Tag everyone and announce quiz activation
                     announce_text = "@all \n"
                     announce_text += f"📣 New quiz '{quiz.topic}' is now active! 🎯\n"
 
@@ -656,37 +674,26 @@ async def private_message_handler(update: Update, context: CallbackContext):
                                 rank = int(rank_str)
                             except (ValueError, TypeError):
                                 rank = rank_str
-                            # simple ordinal
                             suffix = {1: "st", 2: "nd", 3: "rd"}.get(rank, "th")
                             reward_parts.append(f"{rank}{suffix}: {amt} NEAR")
                         announce_text += "Rewards: " + ", ".join(reward_parts) + "\n"
 
-                    # Include end time if set
                     if getattr(quiz, "end_time", None):
-                        # Format UTC end_time
                         end_str = quiz.end_time.strftime("%Y-%m-%d %H:%M UTC")
                         announce_text += f"Ends at: {end_str}\n"
 
                     announce_text += "Type /playquiz to participate!"
-
                     await context.bot.send_message(
-                        chat_id=quiz.group_chat_id,
-                        text=announce_text,
+                        chat_id=quiz.group_chat_id, text=announce_text
                     )
-
             finally:
                 session.close()
-
         else:
             await update.message.reply_text(
                 f"⚠️ There was an issue saving your transaction hash for Quiz ID {quiz_id_awaiting_hash}. "
                 "Please try sending the hash again or contact support."
             )
-
         context.user_data.pop("awaiting_payment_hash_for_quiz_id", None)
-        logger.info(
-            f"Cleared 'awaiting_payment_hash_for_quiz_id' for user {user_id}. Current user_data: {context.user_data}"
-        )
         return
 
     # Check for reward input (WTA, Top3, Custom, Manual)

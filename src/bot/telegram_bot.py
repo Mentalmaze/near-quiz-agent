@@ -108,8 +108,9 @@ class TelegramBot:
             DURATION_INPUT,
             CONFIRM,
             link_wallet_handler,
-            unlink_wallet_handler,  # Add import for the new handler
+            unlink_wallet_handler,
             play_quiz_handler,
+            play_quiz_selection_callback,  # New multi-quiz selection handler
             quiz_answer_handler,
             private_message_handler,
             winners_handler,
@@ -213,6 +214,13 @@ class TelegramBot:
 
         # Handle callback queries for quiz answers
         self.app.add_handler(CallbackQueryHandler(quiz_answer_handler))
+
+        # New: handle quiz selection callback when multiple quizzes are active in a group
+        self.app.add_handler(
+            CallbackQueryHandler(
+                play_quiz_selection_callback, pattern=r"^playquiz_select:"
+            )
+        )
 
         # Handle private text messages (MUST BE LAST as it's the most generic)
         # Only messages not handled by other handlers will reach this
