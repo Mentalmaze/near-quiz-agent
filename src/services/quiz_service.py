@@ -10,7 +10,7 @@ import uuid
 import json
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import traceback
 from utils.config import Config
 
@@ -259,12 +259,10 @@ async def process_questions(
     topic,
     questions_raw,
     group_chat_id,
-    duration_days=None,
-    duration_hours=None,
-    duration_minutes=None,
+    duration_seconds: int | None = None, # Changed parameters
 ):
     """Process multiple questions from raw text and save them as a quiz."""
-    logger.info(f"Processing questions for topic: {topic}")
+    logger.info(f"Processing questions for topic: {topic} with duration_seconds: {duration_seconds}")
 
     # Parse multiple questions
     questions_list = parse_multiple_questions(questions_raw)
@@ -278,25 +276,14 @@ async def process_questions(
         )
         return
 
-    # Calculate total_minutes for duration
-    total_minutes = 0
-    if duration_days:
-        total_minutes += duration_days * 24 * 60
-    if duration_hours:
-        total_minutes += duration_hours * 60
-    if duration_minutes:
-        total_minutes += duration_minutes
-
-    # Calculate end time if duration was specified
+    # Calculate end time if duration_seconds was specified
     end_time = None
-    if (duration_days or duration_hours or duration_minutes) and total_minutes > 0:
-        end_time = datetime.utcnow()
-        if duration_days:
-            end_time += timedelta(days=duration_days)
-        if duration_hours:
-            end_time += timedelta(hours=duration_hours)
-        if duration_minutes:
-            end_time += timedelta(minutes=duration_minutes)
+    if duration_seconds and duration_seconds > 0:
+        end_time = datetime.utcnow() + timedelta(seconds=duration_seconds)
+        logger.info(f"Quiz end time calculated: {end_time} based on {duration_seconds} seconds.")
+    else:
+        logger.info("No duration specified or duration is zero, quiz will not have an end time.")
+
 
     # Persist quiz with multiple questions
     session = SessionLocal()
@@ -317,7 +304,24 @@ async def process_questions(
 
     # Notify group and DM creator for contract setup
     num_questions = len(questions_list)
-    duration_info = f" (Active for {duration_days} days)" if duration_days else ""
+
+    duration_text_parts = []
+    if duration_seconds and duration_seconds > 0:
+        temp_duration = duration_seconds
+        days = temp_duration // (24 * 3600)
+        temp_duration %= (24 * 3600)
+        hours = temp_duration // 3600
+        temp_duration %= 3600
+        minutes = temp_duration // 60
+
+        if days > 0:
+            duration_text_parts.append(f"{days} day{'s' if days > 1 else ''}")
+        if hours > 0:
+            duration_text_parts.append(f"{hours} hour{'s' if hours > 1 else ''}")
+        if minutes > 0:
+            duration_text_parts.append(f"{minutes} minute{'s' if minutes > 1 else ''}")
+
+    duration_info = f" (Active for {', '.join(duration_text_parts)})" if duration_text_parts else ""
 
     await safe_send_message(
         context.bot,
@@ -635,106 +639,159 @@ def parse_questions(raw_questions):
 
 async def play_quiz(update: Update, context: CallbackContext):
     """Handler for /playquiz command; DM quiz questions to a player."""
-    from models.quiz import QuizStatus, Quiz  # ensure proper imports
-    from utils.telegram_helpers import safe_send_message
-    from store.database import SessionLocal
-    from telegram import InlineKeyboardMarkup, InlineKeyboardButton
-
     user_id = str(update.effective_user.id)
-    # Wallet check omitted for brevity
+    # Wallet check can be added here if needed:
+    # if not await check_wallet_linked(user_id):
+    #     await safe_send_message(
+    #         context.bot,
+    #         update.effective_chat.id,
+    #         "Please link your wallet first using /linkwallet <wallet_address>.",
+    #     )
+    #     return
 
-    # Determine quiz_id based on chat context and arguments
+    quiz_id_to_play = None
+    if context.args:
+        quiz_id_to_play = context.args[0]
+        logger.info(f"Quiz ID provided via args: {quiz_id_to_play}")
+
     session = SessionLocal()
     try:
-        # If in a group chat and no explicit ID provided, filter by group_chat_id
-        if update.effective_chat.type != "private" and not context.args:
-            group_id = update.effective_chat.id
+        group_chat_id = None
+        if update.effective_chat.type in ["group", "supergroup"]:
+            group_chat_id = update.effective_chat.id
+
+        if not quiz_id_to_play and group_chat_id:
+            logger.info(
+                f"No quiz ID in args, checking active quizzes for group: {group_chat_id}"
+            )
             active_quizzes = (
                 session.query(Quiz)
                 .filter(
-                    Quiz.status == QuizStatus.ACTIVE, Quiz.group_chat_id == group_id
+                    Quiz.status == QuizStatus.ACTIVE,
+                    Quiz.group_chat_id == group_chat_id,
+                    Quiz.end_time
+                    > datetime.utcnow(),  # Only quizzes that haven't ended
                 )
-                .order_by(Quiz.last_updated.desc())
+                .order_by(Quiz.end_time)  # Optional: order by soonest ending
                 .all()
             )
-            if not active_quizzes:
-                await safe_send_message(
-                    context.bot, group_id, "No active quizzes in this group right now."
-                )
-                return
+            logger.info(
+                f"Found {len(active_quizzes)} active quizzes for group {group_chat_id}."
+            )
+
             if len(active_quizzes) > 1:
-                keyboard = [
-                    [
-                        InlineKeyboardButton(
-                            f"Quiz {q.id}: {q.topic}",
-                            callback_data=f"playquiz_select:{q.id}",
-                        )
-                    ]
-                    for q in active_quizzes
-                ]
+                buttons = []
+                for i, q in enumerate(active_quizzes):
+                    num_questions = len(q.questions) if q.questions else 0
+                    time_remaining_str = ""
+                    if q.end_time:
+                        now_utc = datetime.utcnow()
+                        if q.end_time > now_utc:
+                            delta = q.end_time - now_utc
+                            total_seconds = int(
+                                delta.total_seconds()
+                            )  # Ensure it's an int
+
+                            days = total_seconds // (3600 * 24)
+                            remaining_seconds_after_days = total_seconds % (3600 * 24)
+                            hours = remaining_seconds_after_days // 3600
+                            minutes = (remaining_seconds_after_days % 3600) // 60
+
+                            if days > 0:
+                                time_remaining_str = (
+                                    f"ends in {days}d {hours}h {minutes}m"
+                                )
+                            elif hours > 0:
+                                time_remaining_str = f"ends in {hours}h {minutes}m"
+                            elif minutes > 0:
+                                time_remaining_str = f"ends in {minutes}m"
+                            else:
+                                time_remaining_str = (
+                                    "ends very soon"  # e.g., < 1 minute
+                                )
+                        else:
+                            time_remaining_str = "ended"
+                    else:
+                        time_remaining_str = "no end time"
+
+                    button_text = (
+                        f"{i + 1}. {q.topic} — {num_questions} Q — {time_remaining_str}"
+                    )
+                    buttons.append(
+                        [
+                            InlineKeyboardButton(
+                                button_text, callback_data=f"playquiz_select:{q.id}"
+                            )
+                        ]
+                    )
+
+                if buttons:
+                    reply_markup = InlineKeyboardMarkup(buttons)
+                    await safe_send_message(
+                        context.bot,
+                        update.effective_chat.id,
+                        "Multiple active quizzes found. Please select one to play:",
+                        reply_markup=reply_markup,
+                    )
+                    return
+            elif len(active_quizzes) == 1:
+                quiz_id_to_play = active_quizzes[0].id
+                logger.info(f"One active quiz found ({quiz_id_to_play}), proceeding.")
+            else:
                 await safe_send_message(
                     context.bot,
-                    group_id,
-                    "Multiple active quizzes detected. Please select one to play:",
-                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    update.effective_chat.id,
+                    "No active quizzes found in this group.",
                 )
                 return
-            # only one quiz
-            quiz_id = active_quizzes[0].id
-        else:
-            # explicit ID from args or in private chat
-            quiz_id = context.args[0] if context.args else None
-    finally:
-        session.close()
 
-    if not quiz_id:
-        # fallback if missing
-        await safe_send_message(
-            context.bot, update.effective_chat.id, "Please specify a quiz ID to play."
-        )
-        return
-
-    # Proceed to fetch and DM the quiz
-    session = SessionLocal()
-    try:
-        quiz = (
-            session.query(Quiz)
-            .filter(
-                Quiz.id == quiz_id,
-                Quiz.group_chat_id
-                == (
-                    update.effective_chat.id
-                    if update.effective_chat.type != "private"
-                    else quiz.group_chat_id
-                ),
+        if not quiz_id_to_play:
+            await safe_send_message(
+                context.bot,
+                update.effective_chat.id,
+                "Please specify a quiz ID to play (e.g., /playquiz <quiz_id>), or use /playquiz in a group with active quizzes.",
             )
-            .first()
+            return
+
+        quiz_to_dm = session.query(Quiz).filter(Quiz.id == quiz_id_to_play).first()
+
+        if not quiz_to_dm:
+            await safe_send_message(
+                context.bot,
+                update.effective_chat.id,
+                f"No quiz found with ID {quiz_id_to_play}.",
+            )
+            return
+
+        if quiz_to_dm.status != QuizStatus.ACTIVE or (
+            quiz_to_dm.end_time and quiz_to_dm.end_time <= datetime.utcnow()
+        ):
+            await safe_send_message(
+                context.bot,
+                update.effective_chat.id,
+                f"Quiz '{quiz_to_dm.topic}' (ID: {quiz_id_to_play}) is not currently active or has ended.",
+            )
+            return
+
+        if update.effective_chat.type != "private":
+            await safe_send_message(
+                context.bot,
+                update.effective_chat.id,
+                f"@{update.effective_user.username}, I'll send you the quiz '{quiz_to_dm.topic}' in a private message!",
+            )
+
+        await send_quiz_question(context.bot, user_id, quiz_to_dm, 0)
+
+    except Exception as e:
+        logger.error(f"Error in play_quiz: {e}", exc_info=True)
+        await safe_send_message(
+            context.bot,
+            update.effective_chat.id,
+            "An error occurred while trying to play the quiz. Please try again later.",
         )
-    except NameError:
-        quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
     finally:
-        session.close()
-
-    if not quiz:
-        await safe_send_message(
-            context.bot,
-            update.effective_chat.id,
-            f"No quiz found with ID {quiz_id} in this group.",
-        )
-        return
-
-    # Notify group if invoked there
-    if update.effective_chat.type != "private":
-        await safe_send_message(
-            context.bot,
-            update.effective_chat.id,
-            f"@{update.effective_user.username}, I'll send you the quiz in a private message!",
-        )
-
-    # Start DM
-    from .quiz_service import send_quiz_question  # avoid circular import
-
-    await send_quiz_question(context.bot, update.effective_user.id, quiz, 0)
+        if session:  # Ensure session is not None before closing
+            session.close()
 
 
 async def send_quiz_question(bot, user_id, quiz, question_index):

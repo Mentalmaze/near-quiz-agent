@@ -157,14 +157,19 @@ async def start_createquiz_group(update, context):
     )
 
     # Clear potentially stale user_data from previous incomplete flows
-    # (especially reward setup and its own duration flags) before starting a new quiz creation.
     context.user_data.pop("awaiting_reward_input_type", None)
     context.user_data.pop("current_quiz_id_for_reward_setup", None)
     context.user_data.pop("awaiting", None)  # Legacy reward structure flag
     context.user_data.pop("awaiting_reward_quiz_id", None)  # Legacy reward quiz ID flag
-    # Also clear awaiting_duration_input as a safeguard, as it's part of this quiz creation flow
-    # and should be reset if the flow is restarted.
-    context.user_data.pop("awaiting_duration_input", None)
+
+    # Clear quiz creation specific data
+    context.user_data.pop("topic", None)
+    context.user_data.pop("num_questions", None)
+    context.user_data.pop("context_text", None)
+    context.user_data.pop(
+        "duration_seconds", None
+    )  # Ensure any old duration is cleared
+    context.user_data.pop("awaiting_duration_input", None)  # Clear this flag as well
 
     logger.info(
         f"User_data AFTER cleaning for user {user.id} at quiz creation start: {context.user_data}"
@@ -293,10 +298,12 @@ async def duration_choice(update, context):
             f"duration_choice: Returning DURATION_INPUT state for user {update.effective_user.id}"
         )
         return DURATION_INPUT
-    # skip
-    context.user_data["duration_seconds"] = None
+    # skip ("skip_duration")
+    context.user_data["duration_seconds"] = None  # Explicitly set to None if skipped
+    # Clear the flag if it was set and then skipped via button
+    context.user_data.pop("awaiting_duration_input", None)
     logger.info(
-        f"duration_choice: User {update.effective_user.id} skipped duration, going to confirm_prompt"
+        f"duration_choice: User {update.effective_user.id} skipped duration, duration_seconds set to None. Going to confirm_prompt"
     )
     # preview
     return await confirm_prompt(update, context)
@@ -310,42 +317,61 @@ async def duration_input(update, context):
     )
     logger.debug(f"User data for {user_id} at duration_input: {context.user_data}")
     txt = message_text.strip().lower()
-    # simple parse
-    m = re.match(r"(\d+)\s*(minute|hour|min)s?", txt)
+
+    parsed_successfully = False
+    secs = None
+
+    # Primary regex: attempts to match common patterns like "10 min", "2 hours", "30minutes"
+    m = re.match(r"(\d+)\s*(minute|min|hour|hr)s?", txt)
     if m:
         val = int(m.group(1))
         unit = m.group(2)
-        secs = val * (3600 if unit.startswith("hour") else 60)
+        if unit.startswith("hour") or unit.startswith("hr"):
+            secs = val * 3600
+        else:  # minute or min
+            secs = val * 60
+
         context.user_data["duration_seconds"] = secs
         logger.info(
-            f"Successfully parsed duration for user {user_id}: {secs} seconds from '{message_text}'"
+            f"Successfully parsed duration (primary regex) for user {user_id}: {secs} seconds from '{message_text}'"
         )
+        parsed_successfully = True
     else:
-        # Try a more flexible regex
-        m = re.search(r"(\d+)", txt)
-        if m and ("minute" in txt.lower() or "min" in txt.lower()):
-            val = int(m.group(1))
-            secs = val * 60
-            context.user_data["duration_seconds"] = secs
-            logger.info(
-                f"Flexibly parsed duration: {secs} seconds from '{message_text}'"
-            )
-        elif m and "hour" in txt.lower():
-            val = int(m.group(1))
-            secs = val * 3600
-            context.user_data["duration_seconds"] = secs
-            logger.info(
-                f"Flexibly parsed duration: {secs} seconds from '{message_text}'"
-            )
-        else:
-            context.user_data["duration_seconds"] = 300  # Default to 5 minutes
-            logger.info(
-                f"Could not parse duration from '{message_text}'. Using default: 300 seconds"
-            )
-            await update.message.reply_text(
-                "I couldn't understand that format. Using 5 minutes by default."
-            )
-    return await confirm_prompt(update, context)
+        # Fallback: search for a number, then check for keywords if primary regex fails
+        m_val_search = re.search(r"(\d+)", txt)
+        if m_val_search:
+            val = int(m_val_search.group(1))
+            if "hour" in txt or "hr" in txt:
+                secs = val * 3600
+                context.user_data["duration_seconds"] = secs
+                logger.info(
+                    f"Successfully parsed duration (fallback - hours) for user {user_id}: {secs} seconds from '{message_text}'"
+                )
+                parsed_successfully = True
+            elif "minute" in txt or "min" in txt:
+                secs = val * 60
+                context.user_data["duration_seconds"] = secs
+                logger.info(
+                    f"Successfully parsed duration (fallback - minutes) for user {user_id}: {secs} seconds from '{message_text}'"
+                )
+                parsed_successfully = True
+
+    if parsed_successfully:
+        context.user_data.pop(
+            "awaiting_duration_input", None
+        )  # Clear flag as input is now processed
+        logger.info(
+            f"duration_input: Parsed successfully, proceeding to confirm_prompt for user {user_id}. duration_seconds: {context.user_data.get('duration_seconds')}"
+        )
+        return await confirm_prompt(update, context)
+    else:
+        # If parsing failed either way
+        await update.message.reply_text(
+            "Sorry, I didn't understand that duration. Please use a format like '10 minutes' or '1 hour'. You can also use the 'Skip' button from the previous message if you don't want to set a duration."
+        )
+        # Stay in DURATION_INPUT state to allow user to retry or use the skip button from the prior message.
+        # The 'awaiting_duration_input' flag remains True.
+        return DURATION_INPUT
 
 
 async def confirm_prompt(update, context):
@@ -374,6 +400,7 @@ async def confirm_choice(update, context):
     await update.callback_query.answer()
     if choice == "no":
         await update.callback_query.message.reply_text("Quiz creation canceled.")
+        context.user_data.clear()  # Clear data on cancellation
         return ConversationHandler.END
     # yes: generate and post
     await update.callback_query.message.reply_text("🛠 Generating your quiz—one moment…")
@@ -382,24 +409,20 @@ async def confirm_choice(update, context):
         data["topic"], data["num_questions"], data.get("context_text")
     )
 
-    # Ensure group_chat_id is correctly sourced
-    group_chat_id_to_use = data.get(
-        "group_chat_id", update.effective_chat.id
-    )  # Fallback to current chat if group_chat_id not in user_data
+    group_chat_id_to_use = data.get("group_chat_id", update.effective_chat.id)
 
-    # Call process_questions to store in DB and announce
+    # Call process_questions with duration_seconds
     await process_questions(
-        update,  # Pass the update object
+        update,
         context,
         data["topic"],
         quiz_text,
-        group_chat_id_to_use,  # Use the resolved group_chat_id
-        data.get("duration_seconds"),  # Pass duration if set
+        group_chat_id_to_use,
+        duration_seconds=data.get("duration_seconds"),  # Pass duration_seconds directly
     )
-    # schedule auto distribution
-    if data.get("duration_seconds"):
-        # ... (ensure schedule_auto_distribution is called correctly if needed) ...
-        pass  # Placeholder for actual scheduling logic if different from process_questions
+
+    # schedule_auto_distribution is already called within process_questions if end_time is set
+    # So, no need to call it separately here unless the logic changes.
 
     # Clear conversation data for quiz creation
     context.user_data.clear()
@@ -667,31 +690,78 @@ async def private_message_handler(update: Update, context: CallbackContext):
                 )
                 if quiz and quiz.group_chat_id:
                     announce_text = "@all \n"
-                    announce_text += f"📣 New quiz '{quiz.topic}' is now active! 🎯\n"
+                    announce_text += f"📣 New quiz '**{_escape_markdown_v2_specials(quiz.topic)}**' is now active! 🎯\n\n"
+
+                    num_questions = len(quiz.questions) if quiz.questions else "N/A"
+                    announce_text += f"📚 **{num_questions} Questions**\n"
 
                     # Include reward structure if available
                     schedule = quiz.reward_schedule or {}
-                    if schedule:
-                        reward_parts = []
-                        for rank_str, amt in schedule.items():
-                            try:
-                                rank = int(rank_str)
-                            except (ValueError, TypeError):
-                                rank = rank_str
-                            suffix = {1: "st", 2: "nd", 3: "rd"}.get(rank, "th")
-                            reward_parts.append(f"{rank}{suffix}: {amt} NEAR")
-                        announce_text += "Rewards: " + ", ".join(reward_parts) + "\n"
+                    reward_details_text = schedule.get("details_text", "")
+                    reward_type = schedule.get("type", "")
+
+                    if reward_details_text:
+                        announce_text += f"🏆 **Rewards**: {_escape_markdown_v2_specials(reward_details_text)}\n"
+                    elif reward_type:
+                        announce_text += f"🏆 **Reward Type**: {_escape_markdown_v2_specials(reward_type.replace('_', ' ').title())}\n"
+                    else:
+                        announce_text += (
+                            "🏆 Rewards: To be announced or manually handled.\n"
+                        )
+
+                    announce_text += "\n"
 
                     if getattr(quiz, "end_time", None):
                         end_str = quiz.end_time.strftime("%Y-%m-%d %H:%M UTC")
-                        announce_text += f"Ends at: {end_str}\n"
+                        announce_text += f"⏳ **Ends at**: {end_str}\n"
+                    else:
+                        announce_text += f"⏳ **Ends**: No specific end time set.\n"
 
-                    announce_text += "Type /playquiz to participate!"
-                    await context.bot.send_message(
-                        chat_id=quiz.group_chat_id, text=announce_text
+                    announce_text += "\nType `/playquiz` to participate!"
+
+                    logger.info(
+                        f"Attempting to send announcement to group {quiz.group_chat_id}:\n{announce_text}"
                     )
+                    try:
+                        await context.bot.send_message(
+                            chat_id=quiz.group_chat_id,
+                            text=announce_text,
+                            parse_mode="MarkdownV2",
+                        )
+                        logger.info("Announcement sent successfully.")
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to send announcement with MarkdownV2: {e}. Sending as plain text."
+                        )
+                        # Fallback to plain text if MarkdownV2 fails
+                        plain_announce_text = "@all \n"
+                        plain_announce_text += (
+                            f"New quiz '{quiz.topic}' is now active! \n"
+                        )
+                        plain_announce_text += f"{num_questions} Questions\n"
+                        if reward_details_text:
+                            plain_announce_text += f"Rewards: {reward_details_text}\n"
+                        elif reward_type:
+                            plain_announce_text += f"Reward Type: {reward_type.replace('_', ' ').title()}\n"
+                        else:
+                            plain_announce_text += (
+                                "Rewards: To be announced or manually handled.\n"
+                            )
+                        if getattr(quiz, "end_time", None):
+                            end_str = quiz.end_time.strftime("%Y-%m-%d %H:%M UTC")
+                            plain_announce_text += f"Ends at: {end_str}\n"
+                        else:
+                            plain_announce_text += f"Ends: No specific end time set.\n"
+                        plain_announce_text += "Type /playquiz to participate!"
+                        await context.bot.send_message(
+                            chat_id=quiz.group_chat_id, text=plain_announce_text
+                        )
+
+            except Exception as e:
+                logger.error(f"Error during quiz announcement: {e}", exc_info=True)
             finally:
                 session.close()
+
         else:
             await update.message.reply_text(
                 f"⚠️ There was an issue saving your transaction hash for Quiz ID {quiz_id_awaiting_hash}. "
@@ -836,20 +906,20 @@ async def private_message_handler(update: Update, context: CallbackContext):
             unit = m.group(2)
             secs = val * (3600 if unit.startswith("hour") else 60)
             context.user_data["duration_seconds"] = secs
-            logger.info(f"Parsed duration: {secs} seconds from '{message_text}'")
+            logger.info(
+                f"Successfully parsed duration for user {user_id}: {secs} seconds from '{message_text}'"
+            )
         else:
             # Try a more flexible regex
             m = re.search(r"(\d+)", txt)
-            if m and (
-                "minute" in txt.lower() or "min" in txt.lower()
-            ):  # Added more specific check
+            if m and ("minute" in txt.lower() or "min" in txt.lower()):
                 val = int(m.group(1))
                 secs = val * 60
                 context.user_data["duration_seconds"] = secs
                 logger.info(
                     f"Flexibly parsed duration: {secs} seconds from '{message_text}'"
                 )
-            elif m and "hour" in txt.lower():  # Added more specific check
+            elif m and "hour" in txt.lower():
                 val = int(m.group(1))
                 secs = val * 3600
                 context.user_data["duration_seconds"] = secs
@@ -857,16 +927,13 @@ async def private_message_handler(update: Update, context: CallbackContext):
                     f"Flexibly parsed duration: {secs} seconds from '{message_text}'"
                 )
             else:
-                # Use default duration
-                context.user_data["duration_seconds"] = 300  # 5 minutes
+                context.user_data["duration_seconds"] = 300  # Default to 5 minutes
                 logger.info(
-                    f"Using default duration of 300 seconds for '{message_text}'"
+                    f"Could not parse duration from '{message_text}'. Using default: 300 seconds"
                 )
-                await update.message.reply_text(  # Notify user of default
-                    "I couldn't understand that duration format. Using 5 minutes by default."
+                await update.message.reply_text(
+                    "I couldn't understand that format. Using 5 minutes by default."
                 )
-
-        # Call confirm_prompt and return its state to correctly transition the ConversationHandler
         return await confirm_prompt(update, context)
 
     logger.info(
