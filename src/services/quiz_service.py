@@ -647,6 +647,7 @@ def parse_questions(raw_questions):
 async def play_quiz(update: Update, context: CallbackContext):
     """Handler for /playquiz command; DM quiz questions to a player."""
     user_id = str(update.effective_user.id)
+    user_username = update.effective_user.username or update.effective_user.first_name
     # Wallet check can be added here if needed:
     # if not await check_wallet_linked(user_id):
     #     await safe_send_message(
@@ -771,7 +772,7 @@ async def play_quiz(update: Update, context: CallbackContext):
             await safe_send_message(
                 context.bot,
                 update.effective_chat.id,
-                "You have already played this quiz. You cannot play it again.",
+                f"@{user_username}, you have already played this quiz. You cannot play it again.",
             )
             return
 
@@ -791,7 +792,7 @@ async def play_quiz(update: Update, context: CallbackContext):
             await safe_send_message(
                 context.bot,
                 update.effective_chat.id,
-                f"Quiz '{quiz_to_dm.topic}' (ID: {quiz_id_to_play}) is not currently active or has ended.",
+                f"Quiz '{quiz_to_dm.topic}' (ID: {quiz_id_to_play[:8]}...) is not currently active or has ended.",
             )
             return
 
@@ -799,7 +800,7 @@ async def play_quiz(update: Update, context: CallbackContext):
             await safe_send_message(
                 context.bot,
                 update.effective_chat.id,
-                f"@{update.effective_user.username}, I'll send you the quiz '{quiz_to_dm.topic}' in a private message!",
+                f"@{user_username}, I'll send you the quiz '{quiz_to_dm.topic}' (ID: {quiz_id_to_play[:8]}...) in a private message!",
             )
 
         await send_quiz_question(context.bot, user_id, quiz_to_dm, 0)
