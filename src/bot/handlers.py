@@ -632,13 +632,25 @@ async def play_quiz_selection_callback(update: Update, context: CallbackContext)
     """Handles selection of a quiz when multiple active quizzes exist in a group"""
     query = update.callback_query
     await query.answer()
-    # Extract chosen quiz ID
+
+    # Extract chosen quiz ID and original user ID from callback data
     try:
-        _, quiz_id = query.data.split(":", 1)
+        _, quiz_id, original_user_id = query.data.split(":", 2)
     except ValueError:
         await query.edit_message_text("Invalid selection. Please try /playquiz again.")
         return
-    # Confirm selection to user
+
+    # Check if the current user is the same as the original user who requested the quiz
+    current_user_id = str(update.effective_user.id)
+    if current_user_id != original_user_id:
+        # Show a notification to the wrong user, but don't edit the message
+        await query.answer(
+            "This quiz selection is for another user. Please run /playquiz yourself to start a quiz.",
+            show_alert=True,
+        )
+        return
+
+    # Confirm selection to the correct user
     await query.edit_message_text(
         f"✅ You selected Quiz {quiz_id}. Sending your quiz via DM..."
     )

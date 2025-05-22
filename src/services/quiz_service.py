@@ -768,7 +768,8 @@ async def play_quiz(update: Update, context: CallbackContext):
                     buttons.append(
                         [
                             InlineKeyboardButton(
-                                button_text, callback_data=f"playquiz_select:{q.id}"
+                                button_text,
+                                callback_data=f"playquiz_select:{q.id}:{user_id}",
                             )
                         ]
                     )

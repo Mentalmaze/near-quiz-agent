@@ -32,7 +32,7 @@ async def main():
     #     migrate_schema()
 
     # Initialize database tables if they don't exist
-    # init_db()
+    init_db()
 
     # Start telegram bot
     # Check if WEBHOOK_URL is defined and not empty in Config
