@@ -590,7 +590,11 @@ class BlockchainMonitor:
                 if "Transfer" in action:
                     total_yocto += int(action["Transfer"].get("deposit", 0))
 
-            if total_yocto >= quiz_data["required_amount"] * NEAR:
+            # Calculate required amount including 2% fee
+            required_amount = quiz_data["required_amount"]
+            required_amount_with_fee = round(required_amount * 1.02, 6)
+
+            if total_yocto >= required_amount_with_fee * NEAR:
                 # mark active and announce in new session with retry logic
                 with get_db() as session:
                     quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
