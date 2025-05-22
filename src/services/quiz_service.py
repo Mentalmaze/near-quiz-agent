@@ -461,104 +461,104 @@ async def save_quiz_payment_hash(quiz_id: str, payment_hash: str) -> bool:
         session.close()
 
 
-async def schedule_auto_distribution(application, quiz_id, delay_seconds):
-    """Schedule automatic reward distribution after the quiz ends."""
-    try:
-        # Wait until the quiz deadline
-        await asyncio.sleep(delay_seconds)
+# async def schedule_auto_distribution(application, quiz_id, delay_seconds):
+#     """Schedule automatic reward distribution after the quiz ends."""
+#     try:
+#         # Wait until the quiz deadline
+#         await asyncio.sleep(delay_seconds)
 
-        # Load quiz state from database
-        session = SessionLocal()
-        try:
-            quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
-            if not quiz:
-                logger.error(f"Quiz {quiz_id} not found for auto distribution")
-                return
-            # If the quiz ended without verified funding, alert and skip distribution
-            if quiz.status == QuizStatus.FUNDING:
-                logger.info(
-                    f"Quiz {quiz_id} ended without verified funding, skipping auto distribution"
-                )
-                if group_chat_id:
-                    text = (
-                        f"⚠️ Quiz '{topic}' has ended but funding was never verified. "
-                        "Please ask the creator to verify the deposit with the transaction hash."
-                    )
-                    logger.info(
-                        f"Auto-distribution funding-failure message for quiz {quiz_id} to chat {group_chat_id}: '{text}'"
-                    )
-                    await application.bot.send_message(chat_id=group_chat_id, text=text)
-                return
-            # Only distribute when truly active
-            if quiz.status != QuizStatus.ACTIVE:
-                logger.info(
-                    f"Quiz {quiz_id} is not in ACTIVE state (status={quiz.status}), skipping auto distribution"
-                )
-                return
-            group_chat_id = quiz.group_chat_id
-            topic = quiz.topic
-        finally:
-            session.close()
+#         # Load quiz state from database
+#         session = SessionLocal()
+#         try:
+#             quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
+#             if not quiz:
+#                 logger.error(f"Quiz {quiz_id} not found for auto distribution")
+#                 return
+#             # If the quiz ended without verified funding, alert and skip distribution
+#             if quiz.status == QuizStatus.FUNDING:
+#                 logger.info(
+#                     f"Quiz {quiz_id} ended without verified funding, skipping auto distribution"
+#                 )
+#                 if group_chat_id:
+#                     text = (
+#                         f"⚠️ Quiz '{topic}' has ended but funding was never verified. "
+#                         "Please ask the creator to verify the deposit with the transaction hash."
+#                     )
+#                     logger.info(
+#                         f"Auto-distribution funding-failure message for quiz {quiz_id} to chat {group_chat_id}: '{text}'"
+#                     )
+#                     await application.bot.send_message(chat_id=group_chat_id, text=text)
+#                 return
+#             # Only distribute when truly active
+#             if quiz.status != QuizStatus.ACTIVE:
+#                 logger.info(
+#                     f"Quiz {quiz_id} is not in ACTIVE state (status={quiz.status}), skipping auto distribution"
+#                 )
+#                 return
+#             group_chat_id = quiz.group_chat_id
+#             topic = quiz.topic
+#         finally:
+#             session.close()
 
-        logger.info(f"Quiz {quiz_id} deadline reached, attempting auto distribution")
+#         logger.info(f"Quiz {quiz_id} deadline reached, attempting auto distribution")
 
-        # Retrieve blockchain monitor from the application
-        blockchain_monitor = getattr(application, "blockchain_monitor", None)
-        logger.info(
-            f"[schedule_auto_distribution] application.blockchain_monitor={blockchain_monitor}"
-        )
-        if not blockchain_monitor:
-            logger.error(
-                f"Cannot perform auto distribution for quiz {quiz_id}: blockchain monitor not available"
-            )
-            if group_chat_id:
-                text = (
-                    f"⚠️ Quiz '{topic}' has ended but automatic reward distribution failed. "
-                    f"Please use /distributerewards {quiz_id} to distribute rewards manually."
-                )
-                logger.info(
-                    f"Auto-distribution failure message (no monitor) for quiz {quiz_id} to chat {group_chat_id}: '{text}'"
-                )
-                await application.bot.send_message(
-                    chat_id=group_chat_id,
-                    text=text,
-                )
-            return
+#         # Retrieve blockchain monitor from the application
+#         blockchain_monitor = getattr(application, "blockchain_monitor", None)
+#         logger.info(
+#             f"[schedule_auto_distribution] application.blockchain_monitor={blockchain_monitor}"
+#         )
+#         if not blockchain_monitor:
+#             logger.error(
+#                 f"Cannot perform auto distribution for quiz {quiz_id}: blockchain monitor not available"
+#             )
+#             if group_chat_id:
+#                 text = (
+#                     f"⚠️ Quiz '{topic}' has ended but automatic reward distribution failed. "
+#                     f"Please use /distributerewards {quiz_id} to distribute rewards manually."
+#                 )
+#                 logger.info(
+#                     f"Auto-distribution failure message (no monitor) for quiz {quiz_id} to chat {group_chat_id}: '{text}'"
+#                 )
+#                 await application.bot.send_message(
+#                     chat_id=group_chat_id,
+#                     text=text,
+#                 )
+#             return
 
-        # Before distributing, check if anyone participated
-        session2 = SessionLocal()
-        try:
-            winners = QuizAnswer.compute_quiz_winners(session2, quiz_id)
-            if not winners:
-                if group_chat_id:
-                    text = f"⚠️ Quiz '{topic}' ended with no participants — no rewards to distribute."
-                    logger.info(
-                        f"Auto-distribution no-participants message for quiz {quiz_id} to chat {group_chat_id}: '{text}'"
-                    )
-                    await application.bot.send_message(chat_id=group_chat_id, text=text)
-                return
-        finally:
-            session2.close()
+#         # Before distributing, check if anyone participated
+#         session2 = SessionLocal()
+#         try:
+#             winners = QuizAnswer.compute_quiz_winners(session2, quiz_id)
+#             if not winners:
+#                 if group_chat_id:
+#                     text = f"⚠️ Quiz '{topic}' ended with no participants — no rewards to distribute."
+#                     logger.info(
+#                         f"Auto-distribution no-participants message for quiz {quiz_id} to chat {group_chat_id}: '{text}'"
+#                     )
+#                     await application.bot.send_message(chat_id=group_chat_id, text=text)
+#                 return
+#         finally:
+#             session2.close()
 
-        # Perform reward distribution
-        success = await blockchain_monitor.distribute_rewards(quiz_id)
+#         # Perform reward distribution
+#         success = await blockchain_monitor.distribute_rewards(quiz_id)
 
-        # Notify group chat of result
-        if group_chat_id:
-            if success:
-                text = f"🏆 Quiz '{topic}' has ended and rewards have been automatically distributed to winners!"
-            else:
-                text = (
-                    f"⚠️ Quiz '{topic}' has ended but automatic reward distribution failed. "
-                    f"Please use /distributerewards {quiz_id} to distribute rewards manually."
-                )
-            logger.info(
-                f"Auto-distribution result message for quiz {quiz_id} to chat {group_chat_id}: '{text}'"
-            )
-            await application.bot.send_message(chat_id=group_chat_id, text=text)
-    except Exception as e:
-        logger.error(f"Error in auto distribution for quiz {quiz_id}: {e}")
-        traceback.print_exc()
+#         # Notify group chat of result
+#         if group_chat_id:
+#             if success:
+#                 text = f"🏆 Quiz '{topic}' has ended and rewards have been automatically distributed to winners!"
+#             else:
+#                 text = (
+#                     f"⚠️ Quiz '{topic}' has ended but automatic reward distribution failed. "
+#                     f"Please use /distributerewards {quiz_id} to distribute rewards manually."
+#                 )
+#             logger.info(
+#                 f"Auto-distribution result message for quiz {quiz_id} to chat {group_chat_id}: '{text}'"
+#             )
+#             await application.bot.send_message(chat_id=group_chat_id, text=text)
+#     except Exception as e:
+#         logger.error(f"Error in auto distribution for quiz {quiz_id}: {e}")
+#         traceback.print_exc()
 
 
 def parse_multiple_questions(raw_questions):
@@ -1399,3 +1399,175 @@ async def distribute_quiz_rewards(update: Update, context: CallbackContext):
             await processing_msg.delete()
         except:
             pass
+
+
+async def schedule_auto_distribution(application, quiz_id, delay_seconds):
+    """Schedule automatic reward distribution after the quiz ends."""
+    try:
+        # Wait until the quiz deadline
+        await asyncio.sleep(delay_seconds)
+
+        # Load quiz state from database
+        session = SessionLocal()
+        try:
+            quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
+            if not quiz:
+                logger.error(f"[schedule_auto_distribution] Quiz {quiz_id} not found.")
+                return
+
+            logger.info(
+                f"[schedule_auto_distribution] Quiz {quiz_id} found. Status: {quiz.status}"
+            )
+
+            # Check if the quiz ended while still in FUNDING status
+            if quiz.status == QuizStatus.FUNDING:
+                logger.warning(
+                    f"[schedule_auto_distribution] Quiz {quiz_id} ended but was still in FUNDING status."
+                )
+                if quiz.group_chat_id:
+                    try:
+                        await application.bot.send_message(
+                            chat_id=quiz.group_chat_id,
+                            text=f"ðŸ¤” Quiz '{quiz.topic}' ended but was still awaiting funding. Please verify the deposit and manually trigger reward distribution if needed.",
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"[schedule_auto_distribution] Failed to send FUNDING status warning to group {quiz.group_chat_id}: {e}"
+                        )
+                return  # Do not proceed with distribution if it was never properly funded and activated
+
+            # Ensure the quiz is ACTIVE or has just ended (e.g. if this is called right after end_time)
+            # We will rely on distribute_rewards to re-check status if it's already CLOSED.
+            if quiz.status not in [
+                QuizStatus.ACTIVE,
+                QuizStatus.CLOSED,
+            ]:  # Allow CLOSED if we are re-trying or something
+                logger.warning(
+                    f"[schedule_auto_distribution] Quiz {quiz_id} is not in ACTIVE or CLOSED state (current: {quiz.status}). Distribution will not proceed at this time."
+                )
+                # Potentially send a message if it's an unexpected state like DRAFT
+                return
+
+            # Check for participants
+            session = SessionLocal()
+            try:
+                participants_count = (
+                    session.query(QuizAnswer)
+                    .filter(QuizAnswer.quiz_id == quiz_id)
+                    .distinct(QuizAnswer.user_id)
+                    .count()
+                )
+                if participants_count == 0:
+                    logger.info(
+                        f"[schedule_auto_distribution] Quiz {quiz_id} had no participants. No rewards to distribute."
+                    )
+                    if quiz.group_chat_id:
+                        try:
+                            await application.bot.send_message(
+                                chat_id=quiz.group_chat_id,
+                                text=f"ðŸ§ Quiz '{quiz.topic}' has ended, but there were no participants. No rewards to distribute.",
+                            )
+                            quiz.status = QuizStatus.CLOSED  # Mark as closed
+                            if hasattr(
+                                quiz, "rewards_distributed_at"
+                            ):  # Check if the attribute exists
+                                quiz.rewards_distributed_at = (
+                                    datetime.utcnow()
+                                )  # Mark as processed
+                            session.commit()
+                        except Exception as e:
+                            logger.error(
+                                f"[schedule_auto_distribution] Failed to send no participants message to group {quiz.group_chat_id}: {e}"
+                            )
+                    return
+            finally:
+                session.close()
+
+            logger.info(
+                f"[schedule_auto_distribution] Attempting to distribute rewards for quiz {quiz_id}."
+            )
+            blockchain_monitor = application.blockchain_monitor
+            logger.info(
+                f"[schedule_auto_distribution] application.blockchain_monitor={blockchain_monitor}"
+            )
+
+            if blockchain_monitor:
+                # The distribute_rewards function now returns:
+                # - A list of successful_transfers (can be empty if no one got rewards but processing happened)
+                # - None if there were no winners to begin with
+                # - False if a critical error occurred during distribution attempt
+                distribution_result = await blockchain_monitor.distribute_rewards(
+                    quiz_id
+                )
+
+                group_chat_id = quiz.group_chat_id
+                if group_chat_id:
+                    message_text = ""
+                    if distribution_result is False:
+                        # Critical error
+                        message_text = f"âš ï¸ Automatic reward distribution for quiz '{quiz.topic}' failed due to an internal error. Please check the logs."
+                    elif distribution_result is None:
+                        # No winners found by distribute_rewards (should align with the no participants check, but good to handle)
+                        message_text = f"ðŸ§ Quiz '{quiz.topic}' has ended. No winners were found to distribute rewards to."
+                    elif isinstance(distribution_result, list):
+                        if (
+                            not distribution_result
+                        ):  # Empty list - winners processed, but no successful transfers
+                            message_text = f"ðŸŽŠ Quiz '{quiz.topic}' has ended. Rewards were processed, but no transfers were completed (e.g., winners without linked wallets or individual transfer issues)."
+                        else:  # Non-empty list - successful transfers
+                            winner_mentions = []
+                            for transfer_info in distribution_result:
+                                # Assuming user_id is a string convertible to int for Telegram mention
+                                # And username is available for a nice @mention fallback
+                                user_id_int = None
+                                try:
+                                    user_id_int = int(transfer_info["user_id"])
+                                except ValueError:
+                                    logger.warning(
+                                        f"Could not convert user_id {transfer_info['user_id']} to int for mention."
+                                    )
+
+                                username = transfer_info.get("username")
+                                if user_id_int and username:
+                                    winner_mentions.append(
+                                        f'<a href="tg://user?id={user_id_int}">@{username}</a>'
+                                    )
+                                elif (
+                                    username
+                                ):  # Fallback to just @username if ID is bad
+                                    winner_mentions.append(f"@{username}")
+                                # else: skip mention if no good identifier
+
+                            if winner_mentions:
+                                winners_str = ", ".join(winner_mentions)
+                                message_text = f"🎉 Quiz '{quiz.topic}' has ended! 🎊\n\nCongratulations to our winner(s): {winners_str}! \nCheck your NEAR wallets for your rewards! 💰"
+                            else:
+                                message_text = f"ðŸŽŠ Quiz '{quiz.topic}' has ended and rewards have been distributed. Winners, please check your wallets!"
+
+                    if message_text:
+                        try:
+                            await application.bot.send_message(
+                                chat_id=group_chat_id,
+                                text=message_text,
+                                parse_mode="HTML",  # Important for tg://user?id= links
+                            )
+                            logger.info(
+                                f"[schedule_auto_distribution] Sent distribution result message for quiz {quiz_id} to group {group_chat_id}"
+                            )
+                        except Exception as e:
+                            logger.error(
+                                f"[schedule_auto_distribution] Failed to send message to group {group_chat_id} for quiz {quiz_id}: {e}"
+                            )
+                    else:
+                        logger.warning(
+                            f"[schedule_auto_distribution] No specific message generated for quiz {quiz_id} distribution status."
+                        )
+            else:
+                logger.error(
+                    "[schedule_auto_distribution] Blockchain monitor not found in application context."
+                )
+        finally:
+            session.close()
+    except Exception as e:
+        logger.error(f"Error in auto distribution for quiz {quiz_id}: {e}")
+        traceback.print_exc()

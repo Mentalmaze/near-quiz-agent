@@ -227,7 +227,7 @@ class BlockchainMonitor:
             if session is not None:
                 session.close()
 
-    async def distribute_rewards(self, quiz_id: str) -> bool:
+    async def distribute_rewards(self, quiz_id: str) -> Optional[List[Dict[str, Any]]]:
         """
         Distribute rewards to quiz winners based on the defined reward schedule.
 
@@ -235,7 +235,7 @@ class BlockchainMonitor:
             quiz_id: ID of the quiz to distribute rewards for
 
         Returns:
-            bool: True if rewards were successfully distributed, False otherwise
+            Optional[List[Dict[str, Any]]]: None if no winners, list of successful transfers (possibly empty) if winners were processed, False for critical errors
         """
         logger.info(f"[distribute_rewards] called for quiz_id={quiz_id}")
         if not self.near_account:
@@ -276,15 +276,13 @@ class BlockchainMonitor:
             )
             if not winners:
                 logger.warning(f"No winners found for quiz {quiz_id}")
-                # If no winners, it's not a failure of distribution, but no one to distribute to.
-                # Depending on desired behavior, could return True or a specific status.
-                # For now, let's consider it a scenario where no rewards *can* be distributed.
-                # Update quiz status to closed if no winners and quiz ended.
                 quiz.status = QuizStatus.CLOSED
-                quiz.rewards_distributed_at = datetime.utcnow()
+                # Ensure rewards_distributed_at is part of your Quiz model
+                if hasattr(quiz, "rewards_distributed_at"):
+                    quiz.rewards_distributed_at = datetime.utcnow()
                 session.commit()
                 logger.info(f"Quiz {quiz_id} closed as no winners were found.")
-                return True  # Or False if this should be flagged as an issue. Let's say True for now.
+                return None  # Indicates no winners to process
 
             # Get wallet addresses for winners
             from models.user import User  # Already imported but good to note
@@ -413,26 +411,29 @@ class BlockchainMonitor:
             logger.info(
                 f"[distribute_rewards] Total successful transfers: {len(successful_transfers)}"
             )
-            # If at least some transfers were successful, mark quiz as closed
-            if successful_transfers:
-                quiz.status = QuizStatus.CLOSED
+
+            # Mark quiz as CLOSED and set rewards_distributed_at if we processed winners
+            quiz.status = QuizStatus.CLOSED
+            if hasattr(quiz, "rewards_distributed_at"):
                 quiz.rewards_distributed_at = datetime.utcnow()
-                session.commit()
+            session.commit()
+
+            if successful_transfers:
                 logger.info(
                     f"Quiz {quiz_id} marked as CLOSED. Rewards distributed to {len(successful_transfers)} winner(s). Details: {successful_transfers}"
                 )
-                return True
+            else:
+                logger.warning(
+                    f"[distribute_rewards] Quiz {quiz_id} marked as CLOSED. No transfers were successfully performed, though winners might have been present (e.g., no linked wallets, individual transfer failures)."
+                )
 
-            # This part is reached if successful_transfers is empty after processing all winners
-            logger.warning(
-                f"[distribute_rewards] No transfers were successfully performed for quiz {quiz_id}, though winners were found."
-            )
-            return False
+            return successful_transfers  # Return list of successful transfers (can be empty)
 
         except Exception as e:
             logger.error(f"Error distributing rewards for quiz {quiz_id}: {e}")
             traceback.print_exc()
-            return False
+            # Do not change quiz status here, critical failure
+            return False  # Indicates critical failure
         finally:
             if session:
                 session.close()
