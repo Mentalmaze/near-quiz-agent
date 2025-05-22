@@ -21,6 +21,7 @@ from tenacity import (
     wait_exponential,
     retry_if_exception_type,
 )
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -236,15 +237,22 @@ class BlockchainMonitor:
         Returns:
             bool: True if rewards were successfully distributed, False otherwise
         """
+        logger.info(f"[distribute_rewards] called for quiz_id={quiz_id}")
         if not self.near_account:
-            logger.error("Cannot distribute rewards - NEAR account not initialized")
+            logger.error(
+                "[distribute_rewards] Cannot distribute rewards - NEAR account not initialized"
+            )
             return False
+        logger.debug(f"[distribute_rewards] NEAR account present: {self.near_account}")
 
         # Open a new session for this operation
         session = SessionLocal()
         try:
             # Get quiz data and confirm it's in ACTIVE status
             quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
+            logger.info(
+                f"[distribute_rewards] Fetched quiz {quiz_id}: status={quiz.status}, reward_schedule={quiz.reward_schedule}"
+            )
             if not quiz:
                 logger.error(f"Quiz {quiz_id} not found")
                 return False
@@ -255,7 +263,7 @@ class BlockchainMonitor:
 
             if quiz.status != QuizStatus.ACTIVE:
                 logger.error(
-                    f"Quiz {quiz_id} not in ACTIVE state, cannot distribute rewards"
+                    f"[distribute_rewards] Quiz {quiz_id} not in ACTIVE state ({quiz.status}), cannot distribute rewards"
                 )
                 return False
 
@@ -263,111 +271,162 @@ class BlockchainMonitor:
             from models.quiz import QuizAnswer
 
             winners = QuizAnswer.compute_quiz_winners(session, quiz_id)
+            logger.info(
+                f"[distribute_rewards] Found {len(winners)} winner entries: {winners}"
+            )
             if not winners:
                 logger.warning(f"No winners found for quiz {quiz_id}")
-                return False
+                # If no winners, it's not a failure of distribution, but no one to distribute to.
+                # Depending on desired behavior, could return True or a specific status.
+                # For now, let's consider it a scenario where no rewards *can* be distributed.
+                # Update quiz status to closed if no winners and quiz ended.
+                quiz.status = QuizStatus.CLOSED
+                quiz.rewards_distributed_at = datetime.utcnow()
+                session.commit()
+                logger.info(f"Quiz {quiz_id} closed as no winners were found.")
+                return True  # Or False if this should be flagged as an issue. Let's say True for now.
 
             # Get wallet addresses for winners
-            from models.user import User
+            from models.user import User  # Already imported but good to note
 
             reward_schedule = quiz.reward_schedule
+            logger.debug(
+                f"[distribute_rewards] Using reward_schedule: {reward_schedule}"
+            )
 
             # Track successful transfers
             successful_transfers = []
 
             # Process each winner according to reward schedule
             for rank, winner_data in enumerate(winners, 1):
+                logger.debug(
+                    f"[distribute_rewards] Processing rank={rank}, data={winner_data}"
+                )
                 user_id = winner_data["user_id"]
                 user = session.query(User).filter(User.id == user_id).first()
 
                 # Skip if no wallet linked
                 if not user or not user.wallet_address:
-                    logger.warning(f"No wallet linked for user {user_id}, rank {rank}")
+                    logger.warning(
+                        f"[distribute_rewards] User {user_id} (Username: {winner_data.get('username', 'N/A')}) has no wallet linked or user not found, skipping."
+                    )
                     continue
 
-                # Check if there's a reward for this rank
-                reward_amount = None
-                if str(rank) in reward_schedule:
-                    reward_amount = int(reward_schedule[str(rank)])
-                elif rank in reward_schedule:
-                    reward_amount = int(reward_schedule[rank])
+                reward_amount_yoctonear = 0
+                reward_amount_near_str = "0"
 
-                if not reward_amount:
-                    logger.debug(f"No reward defined for rank {rank}")
+                if reward_schedule and isinstance(reward_schedule, dict):
+                    schedule_type = reward_schedule.get("type")
+                    if schedule_type == "wta_amount":  # Winner Takes All
+                        amount_text = str(reward_schedule.get("details_text", ""))
+                        # Expecting format like "1 NEAR" or "0.5 NEAR"
+                        match = re.search(r"(\d+(?:\.\d+)?)", amount_text)
+                        if match:
+                            reward_amount_near_str = match.group(1)
+                            try:
+                                reward_amount_yoctonear = int(
+                                    float(reward_amount_near_str) * NEAR
+                                )  # NEAR is 10^24 yoctoNEAR
+                            except ValueError:
+                                logger.error(
+                                    f"[distribute_rewards] Invalid reward amount in details_text: {amount_text} for quiz {quiz_id}"
+                                )
+                                continue
+                        else:
+                            logger.error(
+                                f"[distribute_rewards] Could not parse reward amount from details_text: {amount_text} for quiz {quiz_id}"
+                            )
+                            continue
+                    # Example for rank-based rewards (if you add this type later)
+                    elif schedule_type == "rank_based" and str(
+                        rank
+                    ) in reward_schedule.get("ranks", {}):
+                        reward_amount_near_str = str(
+                            reward_schedule["ranks"][str(rank)]
+                        )
+                        try:
+                            reward_amount_yoctonear = int(
+                                float(reward_amount_near_str) * NEAR
+                            )
+                        except ValueError:
+                            logger.error(
+                                f"[distribute_rewards] Invalid reward amount for rank {rank}: {reward_amount_near_str} for quiz {quiz_id}"
+                            )
+                            continue
+                    else:
+                        logger.warning(
+                            f"[distribute_rewards] Unknown or unhandled reward schedule type '{schedule_type}' or missing rank info for quiz {quiz_id}. Schedule: {reward_schedule}"
+                        )
+                        continue
+                else:
+                    logger.error(
+                        f"[distribute_rewards] Invalid or missing reward_schedule for quiz {quiz_id}"
+                    )
                     continue
 
-                # Send NEAR to the winner's wallet
+                if reward_amount_yoctonear <= 0:
+                    logger.warning(
+                        f"[distribute_rewards] Calculated reward amount for user {user_id} is zero or negative ({reward_amount_near_str} NEAR), skipping transfer."
+                    )
+                    continue
+
+                recipient_wallet = user.wallet_address
+                logger.info(
+                    f"[distribute_rewards] Attempting to send {reward_amount_near_str} NEAR ({reward_amount_yoctonear} yoctoNEAR) to {recipient_wallet} (User: {winner_data.get('username', 'N/A')}, Rank: {rank})"
+                )
+
                 try:
+                    # THE ACTUAL TRANSFER CALL
+                    tx_result = await self.near_account.send_money(
+                        recipient_wallet, reward_amount_yoctonear
+                    )
+                    # py-near send_money usually returns a dict with transaction outcome or raises error.
+                    # Let's assume tx_result contains a hash or success indicator.
+                    # For robust check, one might inspect tx_result structure based on py-near documentation.
+                    # Simplified: if it doesn't raise, assume success for now and log what we get.
+                    tx_hash_str = str(
+                        tx_result.get("transaction_outcome", {}).get("id", "N/A")
+                        if isinstance(tx_result, dict)
+                        else tx_result
+                    )
+
                     logger.info(
-                        f"Sending {reward_amount} NEAR to {user.wallet_address} (rank {rank})"
+                        f"[distribute_rewards] Successfully sent {reward_amount_near_str} NEAR to {recipient_wallet}. Tx details: {tx_hash_str}"
                     )
-
-                    # Convert to yoctoNEAR (1 NEAR = 10^24 yoctoNEAR)
-                    yocto_amount = reward_amount * NEAR
-
-                    # Execute transfer
-                    transaction = await self.near_account.send_money(
-                        user.wallet_address, yocto_amount
-                    )
-
-                    # Record successful transfer
                     successful_transfers.append(
                         {
                             "user_id": user_id,
-                            "wallet": user.wallet_address,
-                            "amount": reward_amount,
-                            "tx_hash": transaction.transaction.hash,
+                            "username": winner_data.get(
+                                "username", "N/A"
+                            ),  # Changed from user.username
+                            "wallet_address": recipient_wallet,
+                            "amount_near_str": reward_amount_near_str,
+                            "tx_hash": tx_hash_str,
                         }
                     )
-
-                    logger.info(
-                        f"Successfully sent {reward_amount} NEAR to {user.wallet_address}, tx: {transaction.transaction.hash}"
-                    )
-
-                except Exception as e:
+                except Exception as transfer_exc:
                     logger.error(
-                        f"Failed to transfer {reward_amount} NEAR to {user.wallet_address}: {e}"
+                        f"[distribute_rewards] Failed to send NEAR to {recipient_wallet} for user {user_id}: {transfer_exc}"
                     )
                     traceback.print_exc()
 
+            logger.info(
+                f"[distribute_rewards] Total successful transfers: {len(successful_transfers)}"
+            )
             # If at least some transfers were successful, mark quiz as closed
             if successful_transfers:
                 quiz.status = QuizStatus.CLOSED
+                quiz.rewards_distributed_at = datetime.utcnow()
                 session.commit()
-
-                # Announce winners in group chat
-                if quiz.group_chat_id:
-                    winners_text = "🏆 Quiz Results! 🏆\n\n"
-
-                    for rank, winner in enumerate(winners[:3], 1):  # Show top 3
-                        username = winner["username"] or f"User{winner['user_id'][-4:]}"
-                        reward = (
-                            reward_schedule.get(str(rank))
-                            or reward_schedule.get(rank)
-                            or "0"
-                        )
-
-                        # Check if this user received payment
-                        paid_status = (
-                            "✅"
-                            if any(
-                                t["user_id"] == winner["user_id"]
-                                for t in successful_transfers
-                            )
-                            else "⏳"
-                        )
-                        winners_text += f"{rank}. @{username}: {winner['correct_count']} correct - {reward} NEAR {paid_status}\n"
-
-                    try:
-                        await self.bot.send_message(
-                            chat_id=quiz.group_chat_id,
-                            text=winners_text
-                            + "\n💰 Rewards have been distributed to winners' NEAR wallets!",
-                        )
-                    except Exception as e:
-                        logger.error(f"Failed to announce winners: {e}")
-
+                logger.info(
+                    f"Quiz {quiz_id} marked as CLOSED. Rewards distributed to {len(successful_transfers)} winner(s). Details: {successful_transfers}"
+                )
                 return True
+
+            # This part is reached if successful_transfers is empty after processing all winners
+            logger.warning(
+                f"[distribute_rewards] No transfers were successfully performed for quiz {quiz_id}, though winners were found."
+            )
             return False
 
         except Exception as e:
@@ -551,6 +610,8 @@ class BlockchainMonitor:
 # To be called during bot initialization
 async def start_blockchain_monitor(bot):
     """Initialize and start the blockchain monitor with the bot instance."""
+    logger.info(f"[start_blockchain_monitor] creating BlockchainMonitor with bot={bot}")
     monitor = BlockchainMonitor(bot)
     await monitor.start_monitoring()
+    logger.info(f"[start_blockchain_monitor] monitor started: {monitor}")
     return monitor

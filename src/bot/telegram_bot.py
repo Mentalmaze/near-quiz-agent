@@ -240,8 +240,11 @@ class TelegramBot:
     async def init_blockchain(self):
         """Initialize the blockchain monitor."""
         self.blockchain_monitor = await start_blockchain_monitor(self.app.bot)
-
         self.app.blockchain_monitor = self.blockchain_monitor
+        # Confirm monitor was attached correctly
+        logger.info(
+            f"[init_blockchain] application.blockchain_monitor is set: {self.app.blockchain_monitor}"
+        )
 
     async def start(self):
         """Start the bot using webhook or polling, and initialize services."""

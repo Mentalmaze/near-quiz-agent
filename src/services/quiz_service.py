@@ -474,9 +474,25 @@ async def schedule_auto_distribution(application, quiz_id, delay_seconds):
             if not quiz:
                 logger.error(f"Quiz {quiz_id} not found for auto distribution")
                 return
+            # If the quiz ended without verified funding, alert and skip distribution
+            if quiz.status == QuizStatus.FUNDING:
+                logger.info(
+                    f"Quiz {quiz_id} ended without verified funding, skipping auto distribution"
+                )
+                if group_chat_id:
+                    text = (
+                        f"⚠️ Quiz '{topic}' has ended but funding was never verified. "
+                        "Please ask the creator to verify the deposit with the transaction hash."
+                    )
+                    logger.info(
+                        f"Auto-distribution funding-failure message for quiz {quiz_id} to chat {group_chat_id}: '{text}'"
+                    )
+                    await application.bot.send_message(chat_id=group_chat_id, text=text)
+                return
+            # Only distribute when truly active
             if quiz.status != QuizStatus.ACTIVE:
                 logger.info(
-                    f"Quiz {quiz_id} is not in ACTIVE state, skipping auto distribution"
+                    f"Quiz {quiz_id} is not in ACTIVE state (status={quiz.status}), skipping auto distribution"
                 )
                 return
             group_chat_id = quiz.group_chat_id
@@ -488,6 +504,9 @@ async def schedule_auto_distribution(application, quiz_id, delay_seconds):
 
         # Retrieve blockchain monitor from the application
         blockchain_monitor = getattr(application, "blockchain_monitor", None)
+        logger.info(
+            f"[schedule_auto_distribution] application.blockchain_monitor={blockchain_monitor}"
+        )
         if not blockchain_monitor:
             logger.error(
                 f"Cannot perform auto distribution for quiz {quiz_id}: blockchain monitor not available"
@@ -505,6 +524,21 @@ async def schedule_auto_distribution(application, quiz_id, delay_seconds):
                     text=text,
                 )
             return
+
+        # Before distributing, check if anyone participated
+        session2 = SessionLocal()
+        try:
+            winners = QuizAnswer.compute_quiz_winners(session2, quiz_id)
+            if not winners:
+                if group_chat_id:
+                    text = f"⚠️ Quiz '{topic}' ended with no participants — no rewards to distribute."
+                    logger.info(
+                        f"Auto-distribution no-participants message for quiz {quiz_id} to chat {group_chat_id}: '{text}'"
+                    )
+                    await application.bot.send_message(chat_id=group_chat_id, text=text)
+                return
+        finally:
+            session2.close()
 
         # Perform reward distribution
         success = await blockchain_monitor.distribute_rewards(quiz_id)
