@@ -25,6 +25,8 @@ import re
 
 logger = logging.getLogger(__name__)
 
+# Ensure NEAR constant is defined for yoctoNEAR conversion
+NEAR = 10**24  # 1 NEAR in yoctoNEAR
 
 class BlockchainMonitor:
     """
@@ -308,6 +310,11 @@ class BlockchainMonitor:
                     logger.warning(
                         f"[distribute_rewards] User {user_id} (Username: {winner_data.get('username', 'N/A')}) has no wallet linked or user not found, skipping."
                     )
+                    if reward_schedule.get("type") == "wta_amount" and rank == 1:
+                        logger.warning(
+                            f"[distribute_rewards] WTA: Rank 1 winner {user_id} has no wallet. WTA reward cannot be distributed."
+                        )
+                        break  # Stop processing for WTA if rank 1 has no wallet
                     continue
 
                 reward_amount_yoctonear = 0
@@ -315,57 +322,75 @@ class BlockchainMonitor:
 
                 if reward_schedule and isinstance(reward_schedule, dict):
                     schedule_type = reward_schedule.get("type")
+
                     if schedule_type == "wta_amount":  # Winner Takes All
-                        amount_text = str(reward_schedule.get("details_text", ""))
-                        # Expecting format like "1 NEAR" or "0.5 NEAR"
-                        match = re.search(r"(\d+(?:\.\d+)?)", amount_text)
-                        if match:
-                            reward_amount_near_str = match.group(1)
-                            try:
-                                reward_amount_yoctonear = int(
-                                    float(reward_amount_near_str) * NEAR
-                                )  # NEAR is 10^24 yoctoNEAR
-                            except ValueError:
+                        if rank == 1:
+                            amount_text = str(reward_schedule.get("details_text", ""))
+                            match = re.search(r"(\d+(?:\.\d+)?)", amount_text)
+                            if match:
+                                reward_amount_near_str = match.group(1)
+                                try:
+                                    reward_amount_yoctonear = int(
+                                        float(reward_amount_near_str) * NEAR
+                                    )
+                                except ValueError:
+                                    logger.error(
+                                        f"[distribute_rewards] WTA: Invalid reward amount in details_text: {amount_text} for quiz {quiz_id}. No reward will be distributed."
+                                    )
+                                    reward_amount_yoctonear = 0  # Ensure it's zero
+                                    break  # Stop processing for WTA if amount is invalid for rank 1
+                            else:
                                 logger.error(
-                                    f"[distribute_rewards] Invalid reward amount in details_text: {amount_text} for quiz {quiz_id}"
+                                    f"[distribute_rewards] WTA: Could not parse reward amount from details_text: {amount_text} for quiz {quiz_id}. No reward will be distributed."
                                 )
-                                continue
+                                reward_amount_yoctonear = 0  # Ensure it's zero
+                                break  # Stop processing for WTA if amount is unparseable for rank 1
                         else:
-                            logger.error(
-                                f"[distribute_rewards] Could not parse reward amount from details_text: {amount_text} for quiz {quiz_id}"
+                            # For WTA, if we are beyond rank 1, no further rewards.
+                            logger.info(
+                                f"[distribute_rewards] WTA: Rank {rank} is not eligible for Winner-Takes-All reward. Halting WTA distribution."
                             )
-                            continue
-                    # Example for rank-based rewards (if you add this type later)
-                    elif schedule_type == "rank_based" and str(
-                        rank
-                    ) in reward_schedule.get("ranks", {}):
-                        reward_amount_near_str = str(
-                            reward_schedule["ranks"][str(rank)]
-                        )
-                        try:
-                            reward_amount_yoctonear = int(
-                                float(reward_amount_near_str) * NEAR
-                            )
-                        except ValueError:
-                            logger.error(
-                                f"[distribute_rewards] Invalid reward amount for rank {rank}: {reward_amount_near_str} for quiz {quiz_id}"
-                            )
-                            continue
+                            break  # Exit the loop over winners, WTA is for rank 1 only.
+
+                    # elif schedule_type == "rank_based": # Example for future rank-based rewards
+                    #     if str(rank) in reward_schedule.get("ranks", {}):
+                    #         reward_amount_near_str = str(reward_schedule["ranks"][str(rank)])
+                    #         try:
+                    #             reward_amount_yoctonear = int(float(reward_amount_near_str) * NEAR)
+                    #         except ValueError:
+                    #             logger.error(f"[distribute_rewards] Invalid reward amount for rank {rank}: {reward_amount_near_str} for quiz {quiz_id}")
+                    #             continue # Skip this winner if their specific rank reward is invalid
+                    #     else:
+                    #         logger.info(f"[distribute_rewards] Rank {rank} not in rank-based schedule. Skipping.")
+                    #         continue # This rank doesn't get a reward by this schedule
+
                     else:
                         logger.warning(
-                            f"[distribute_rewards] Unknown or unhandled reward schedule type '{schedule_type}' or missing rank info for quiz {quiz_id}. Schedule: {reward_schedule}"
+                            f"[distribute_rewards] Unknown or unhandled reward schedule type '{schedule_type}' or rank {rank} not applicable. Schedule: {reward_schedule}"
                         )
-                        continue
-                else:
+                        continue  # Skip to next winner if schedule doesn't apply or is unknown
+
+                else:  # Invalid/missing reward_schedule
                     logger.error(
                         f"[distribute_rewards] Invalid or missing reward_schedule for quiz {quiz_id}"
                     )
-                    continue
+                    # If WTA and this happens for rank 1, we should stop.
+                    if reward_schedule.get("type") == "wta_amount" and rank == 1:
+                        logger.error(
+                            f"[distribute_rewards] WTA: Invalid or missing reward_schedule for rank 1. No WTA reward will be distributed."
+                        )
+                        break
+                    continue  # Skip to next winner
 
                 if reward_amount_yoctonear <= 0:
                     logger.warning(
-                        f"[distribute_rewards] Calculated reward amount for user {user_id} is zero or negative ({reward_amount_near_str} NEAR), skipping transfer."
+                        f"[distribute_rewards] Calculated reward amount for user {user_id} (Rank {rank}) is zero or negative ({reward_amount_near_str} NEAR), skipping transfer."
                     )
+                    if schedule_type == "wta_amount" and rank == 1:
+                        logger.warning(
+                            f"[distribute_rewards] WTA: Reward for rank 1 is zero or negative. No WTA reward will be distributed."
+                        )
+                        break  # Stop processing for WTA if rank 1 reward is invalid
                     continue
 
                 recipient_wallet = user.wallet_address
@@ -402,12 +427,23 @@ class BlockchainMonitor:
                             "tx_hash": tx_hash_str,
                         }
                     )
+                    if schedule_type == "wta_amount":  # And rank must be 1 here
+                        logger.info(
+                            f"[distribute_rewards] WTA: Reward successfully distributed to rank 1. Halting further distributions for this quiz."
+                        )
+                        break  # WTA fulfilled, exit loop over winners.
                 except Exception as transfer_exc:
                     logger.error(
-                        f"[distribute_rewards] Failed to send NEAR to {recipient_wallet} for user {user_id}: {transfer_exc}"
+                        f"[distribute_rewards] Failed to send NEAR to {recipient_wallet} for user {user_id} (Rank {rank}): {transfer_exc}"
                     )
                     traceback.print_exc()
+                    if schedule_type == "wta_amount":  # And rank must be 1
+                        logger.error(
+                            f"[distribute_rewards] WTA: Transfer FAILED for rank 1. No WTA reward will be distributed."
+                        )
+                        break  # WTA transfer failed for the only eligible winner, exit loop.
 
+            # After the loop
             logger.info(
                 f"[distribute_rewards] Total successful transfers: {len(successful_transfers)}"
             )
