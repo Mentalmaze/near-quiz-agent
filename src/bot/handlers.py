@@ -822,8 +822,10 @@ async def private_message_handler(update: Update, context: CallbackContext):
             logger.info(f"Parsed reward: Amount={total_amount}, Currency={currency}")
 
             if total_amount is not None and currency:
+                fee = round(total_amount * 0.02, 6)
+                total_with_fee = round(total_amount + fee, 6)
                 deposit_instructions = (
-                    f"💰 Please deposit *{total_amount} {currency}* "
+                    f"💰 Please deposit *{total_with_fee} {currency}* (includes 2% fee: {fee} {currency}) "
                     f"to the following address to fund the quiz: `{Config.DEPOSIT_ADDRESS}`\n\n"
                     f"Once sent, please reply with the *transaction hash*."
                 )

@@ -368,6 +368,12 @@ class BlockchainMonitor:
                     )
                     continue
 
+                # Deduct 2% fee from the reward
+                reward_amount_near_str = str(
+                    round(float(reward_amount_near_str) * 0.98, 6)
+                )
+                reward_amount_yoctonear = int(float(reward_amount_near_str) * NEAR)
+
                 recipient_wallet = user.wallet_address
                 logger.info(
                     f"[distribute_rewards] Attempting to send {reward_amount_near_str} NEAR ({reward_amount_yoctonear} yoctoNEAR) to {recipient_wallet} (User: {winner_data.get('username', 'N/A')}, Rank: {rank})"
