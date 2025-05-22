@@ -493,12 +493,16 @@ async def schedule_auto_distribution(application, quiz_id, delay_seconds):
                 f"Cannot perform auto distribution for quiz {quiz_id}: blockchain monitor not available"
             )
             if group_chat_id:
+                text = (
+                    f"⚠️ Quiz '{topic}' has ended but automatic reward distribution failed. "
+                    f"Please use /distributerewards {quiz_id} to distribute rewards manually."
+                )
+                logger.info(
+                    f"Auto-distribution failure message (no monitor) for quiz {quiz_id} to chat {group_chat_id}: '{text}'"
+                )
                 await application.bot.send_message(
                     chat_id=group_chat_id,
-                    text=(
-                        f"⚠️ Quiz '{topic}' has ended but automatic reward distribution failed. "
-                        f"Please use /distributerewards {quiz_id} to distribute rewards manually."
-                    ),
+                    text=text,
                 )
             return
 
@@ -514,6 +518,9 @@ async def schedule_auto_distribution(application, quiz_id, delay_seconds):
                     f"⚠️ Quiz '{topic}' has ended but automatic reward distribution failed. "
                     f"Please use /distributerewards {quiz_id} to distribute rewards manually."
                 )
+            logger.info(
+                f"Auto-distribution result message for quiz {quiz_id} to chat {group_chat_id}: '{text}'"
+            )
             await application.bot.send_message(chat_id=group_chat_id, text=text)
     except Exception as e:
         logger.error(f"Error in auto distribution for quiz {quiz_id}: {e}")
@@ -649,13 +656,13 @@ async def play_quiz(update: Update, context: CallbackContext):
     user_id = str(update.effective_user.id)
     user_username = update.effective_user.username or update.effective_user.first_name
     # Wallet check can be added here if needed:
-    # if not await check_wallet_linked(user_id):
-    #     await safe_send_message(
-    #         context.bot,
-    #         update.effective_chat.id,
-    #         "Please link your wallet first using /linkwallet <wallet_address>.",
-    #     )
-    #     return
+    if not await check_wallet_linked(user_id):
+        await safe_send_message(
+            context.bot,
+            update.effective_chat.id,
+            "Please link your wallet first using /linkwallet <wallet_address>.",
+        )
+        return
 
     quiz_id_to_play = None
     if context.args:
