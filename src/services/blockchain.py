@@ -540,7 +540,21 @@ class BlockchainMonitor:
                 ),
                 "topic": quiz.topic,
                 "group_chat_id": quiz.group_chat_id,
+                "created_at": quiz.created_at,
             }
+
+        # Check if this hash has already been used for any quiz
+        with get_db() as session:
+            existing_quiz = (
+                session.query(Quiz)
+                .filter(Quiz.payment_transaction_hash == tx_hash)
+                .first()
+            )
+            if existing_quiz:
+                logger.warning(
+                    f"Transaction hash {tx_hash} has already been used for quiz {existing_quiz.id}."
+                )
+                return False
 
         try:
             # call NEAR JSON-RPC tx method
@@ -584,6 +598,26 @@ class BlockchainMonitor:
             if tx.get("receiver_id") != quiz_data["deposit_address"]:
                 return False
 
+            # Enforce transfer window: only accept transactions after quiz creation and within 30 minutes
+            block_timestamp_ns = result.get("block_timestamp") or result.get(
+                "block_timestamp_nanosec"
+            )
+            if block_timestamp_ns:
+                block_timestamp = datetime.utcfromtimestamp(
+                    int(block_timestamp_ns) / 1e9
+                )
+                quiz_created_at = quiz_data.get("created_at")
+                if quiz_created_at:
+                    # Only accept if transaction is after quiz creation and within 30 minutes
+                    if (
+                        block_timestamp < quiz_created_at
+                        or block_timestamp > quiz_created_at + timedelta(minutes=30)
+                    ):
+                        logger.warning(
+                            f"Transaction {tx_hash} is outside the allowed window. Block time: {block_timestamp}, Quiz created: {quiz_created_at}"
+                        )
+                        return False
+
             actions = tx.get("actions", [])
             total_yocto = 0
             for action in actions:
@@ -599,6 +633,7 @@ class BlockchainMonitor:
                 with get_db() as session:
                     quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
                     quiz.status = QuizStatus.ACTIVE
+                    quiz.payment_transaction_hash = tx_hash
                     session.commit()
 
                 # send announcement using stored quiz data

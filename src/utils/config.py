@@ -25,7 +25,7 @@ class Config:
 
     # NEAR Blockchain Configuration
     NEAR_RPC_ENDPOINT = os.getenv(
-        "NEAR_RPC_ENDPOINT", "https://rpc.testnet.fastnear.com"
+        "NEAR_RPC_ENDPOINT", "https://free.rpc.fastnear.com"
     )
     NEAR_WALLET_PRIVATE_KEY = os.getenv("NEAR_WALLET_PRIVATE_KEY")
     NEAR_WALLET_ADDRESS = os.getenv("NEAR_WALLET_ADDRESS")
@@ -44,7 +44,7 @@ class Config:
     )
 
     # Address for users to deposit funds for quiz rewards
-    DEPOSIT_ADDRESS = os.getenv("NEAR_WALLET_ADDRESS", "kindpuma8958.testnet")
+    DEPOSIT_ADDRESS = os.getenv("NEAR_WALLET_ADDRESS", "solviumagent.near")
 
     # Quiz Configuration
     DEFAULT_QUIZ_QUESTIONS = 1

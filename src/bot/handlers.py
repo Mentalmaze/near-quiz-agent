@@ -579,10 +579,12 @@ async def link_wallet_handler(update: Update, context: CallbackContext):
 
     wallet_address = context.args[0].strip()
 
-    # Basic validation (you might want to make this more robust)
-    if not (wallet_address.endswith(".near") or wallet_address.endswith(".testnet")):
+    # Only allow mainnet .near addresses
+    if not (
+        wallet_address.endswith(".near") and not wallet_address.endswith(".testnet")
+    ):
         await update.message.reply_text(
-            "Invalid wallet address format. Please provide a valid .near or .testnet address."
+            "❌ Only mainnet NEAR wallets are allowed. Please provide a wallet address ending with '.near' (not '.testnet')."
         )
         return
 

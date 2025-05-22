@@ -36,15 +36,12 @@ async def handle_wallet_address(update: Update, context: CallbackContext):
     user_id = str(update.effective_user.id)
 
     try:
-        # Basic validation
-        if not wallet_address.endswith(".near") and not wallet_address.endswith(
-            ".testnet"
-        ):
+        # Only allow mainnet .near addresses
+        if not wallet_address.endswith(".near") or wallet_address.endswith(".testnet"):
             await safe_send_message(
                 context.bot,
                 update.effective_chat.id,
-                "That doesn't look like a valid NEAR address. "
-                "Please make sure it ends with '.near' or '.testnet'",
+                "❌ Only mainnet NEAR wallets are allowed. Please provide a wallet address ending with '.near' (not '.testnet').",
             )
             return
 

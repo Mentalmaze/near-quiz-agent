@@ -37,6 +37,7 @@ class Quiz(Base):
     end_time = Column(DateTime, nullable=True)
     # Track if winners have been announced
     winners_announced = Column(String, default=False)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
 
 class QuizAnswer(Base):
