@@ -700,32 +700,39 @@ async def send_quiz_question(bot, user_id, quiz, question_index):
 
     # Get the current question
     current_q = questions_list[question_index]
-    question = current_q.get("question", "Question not available")
+    question_text = current_q.get("question", "Question not available")
     options = current_q.get("options", {})
 
-    # Create keyboard for this specific question
+    # Prepare message text with full options
+    message_text_parts = []
+    question_number = question_index + 1
+    total_questions = len(questions_list)
+    message_text_parts.append(f"Quiz: {quiz.topic} (Question {question_number}/{total_questions})")
+    message_text_parts.append(f"\n{question_text}\n")
+
     keyboard = []
-    for key, value in options.items():
+    option_labels = sorted(options.keys()) # Ensure consistent order, e.g., A, B, C, D
+
+    for key in option_labels:
+        value = options[key]
+        message_text_parts.append(f"{key}) {value}")
         # Include question index in callback data to track progress
         keyboard.append(
             [
                 InlineKeyboardButton(
-                    f"{key}) {value}",
+                    f"{key}",  # Button text is now just the option key (A, B, C, etc.)
                     callback_data=f"quiz:{quiz.id}:{question_index}:{key}",
                 )
             ]
         )
-
+    
+    full_message_text = "\n".join(message_text_parts)
     reply_markup = InlineKeyboardMarkup(keyboard)
-
-    # Show question number out of total
-    question_number = question_index + 1
-    total_questions = len(questions_list)
 
     await safe_send_message(
         bot,
         user_id,
-        text=f"Quiz: {quiz.topic} (Question {question_number}/{total_questions})\n\n{question}",
+        text=full_message_text,
         reply_markup=reply_markup,
     )
 
