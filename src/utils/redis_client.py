@@ -117,6 +117,49 @@ class RedisClient:
         key = f"{cls.USER_DATA_PREFIX}{user_id}"
         return cls.delete_value(key)
 
+    # --- Generic Object Caching ---
+    @classmethod
+    def get_cached_object(cls, cache_key: str) -> Optional[Any]:
+        """Retrieves a cached object from Redis."""
+        try:
+            r = cls.get_instance()
+            value_json = r.get(cache_key)
+            if value_json:
+                logger.debug(f"Cache hit for key {cache_key}")
+                return json.loads(value_json)
+            logger.debug(f"Cache miss for key {cache_key}")
+            return None
+        except Exception as e:
+            logger.error(f"Error getting cached object for key {cache_key}: {e}")
+            return None
+
+    @classmethod
+    def set_cached_object(cls, cache_key: str, obj: Any, ex: int = 3600) -> bool:
+        """Caches an object in Redis with an expiration time."""
+        try:
+            r = cls.get_instance()
+            r.set(cache_key, json.dumps(obj), ex=ex)
+            logger.debug(f"Cached object with key {cache_key}")
+            return True
+        except Exception as e:
+            logger.error(f"Error caching object with key {cache_key}: {e}")
+            return False
+
+    @classmethod
+    def delete_cached_object(cls, cache_key: str) -> bool:
+        """Deletes a cached object from Redis."""
+        try:
+            r = cls.get_instance()
+            result = r.delete(cache_key)
+            if result > 0:
+                logger.debug(f"Deleted cached object with key {cache_key}")
+            else:
+                logger.debug(f"Key '{cache_key}' not found in Redis for deletion")
+            return result > 0
+        except Exception as e:
+            logger.error(f"Error deleting cached object with key {cache_key}: {e}")
+            return False
+
 if __name__ == '__main__':
     # Basic test
     logging.basicConfig(level=logging.DEBUG)
