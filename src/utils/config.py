@@ -50,6 +50,12 @@ class Config:
     DEFAULT_QUIZ_QUESTIONS = 1
     MAX_QUIZ_QUESTIONS = 5
 
+    # Redis Configuration
+    REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+    REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+    REDIS_DB = int(os.getenv("REDIS_DB", 0))
+    REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", None)
+
     # Production check helper
     @classmethod
     def is_production(cls):

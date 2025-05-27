@@ -8,5 +8,5 @@ Base = declarative_base()
 class User(Base):
     __tablename__ = "users"
     id = Column(String, primary_key=True)  # Telegram user ID as string
-    wallet_address = Column(String, nullable=True)
+    wallet_address = Column(String, nullable=True, index=True) # Added index
     linked_at = Column(DateTime, default=datetime.datetime.utcnow)

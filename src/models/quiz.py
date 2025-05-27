@@ -19,19 +19,19 @@ class Quiz(Base):
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     topic = Column(String, nullable=False)
     questions = Column(JSON, default=[])
-    status = Column(Enum(QuizStatus), default=QuizStatus.DRAFT)
+    status = Column(Enum(QuizStatus), default=QuizStatus.DRAFT, index=True)  # Added index
     # Reward details and on-chain address
     reward_schedule = Column(JSON, default={})
     deposit_address = Column(String, nullable=True)
     payment_transaction_hash = Column(
-        String, nullable=True
+        String, nullable=True, index=True  # Added index
     )  # For user's funding transaction
     # New columns
     last_updated = Column(
         DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow
     )
     group_chat_id = Column(
-        BigInteger, nullable=True
+        BigInteger, nullable=True, index=True  # Added index
     )  # Changed from Integer to BigInteger
     # Quiz end time
     end_time = Column(DateTime, nullable=True)
@@ -45,11 +45,11 @@ class QuizAnswer(Base):
 
     __tablename__ = "quiz_answers"
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    quiz_id = Column(String, nullable=False)
-    user_id = Column(String, nullable=False)
+    quiz_id = Column(String, nullable=False, index=True)  # Added index
+    user_id = Column(String, nullable=False, index=True)  # Added index
     username = Column(String, nullable=True)  # For displaying winners
     answer = Column(String, nullable=False)  # User's selected answer (e.g., "A", "B")
-    is_correct = Column(String, nullable=False, default=False)  # Whether it's correct
+    is_correct = Column(String, nullable=False, default=False, index=True)  # Added index
     answered_at = Column(DateTime, default=datetime.datetime.utcnow)
 
     # Quick helper to compute rank based on correct answers and speed

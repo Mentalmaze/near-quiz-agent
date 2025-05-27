@@ -31,6 +31,7 @@ from typing import Optional  # Added for type hinting
 from utils.config import Config  # Added to access DEPOSIT_ADDRESS
 from store.database import SessionLocal
 from models.quiz import Quiz
+from utils.redis_client import RedisClient # Added RedisClient import
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -149,78 +150,82 @@ async def start_createquiz_group(update, context):
     """Entry point for the quiz creation conversation"""
     user = update.effective_user
     chat_type = update.effective_chat.type
+    redis_client = RedisClient()
+    user_id = user.id
+
     logger.info(
-        f"User {user.id} initiating /createquiz from {chat_type} chat {update.effective_chat.id}."
+        f"User {user_id} initiating /createquiz from {chat_type} chat {update.effective_chat.id}."
     )
-    logger.info(
-        f"User_data BEFORE cleaning at quiz creation start for user {user.id}: {context.user_data}"
-    )
+    # logger.info(
+    #     f"User_data BEFORE cleaning at quiz creation start for user {user_id}: {context.user_data}"
+    # ) # Cannot log context.user_data directly anymore
 
     # Clear potentially stale user_data from previous incomplete flows
-    context.user_data.pop("awaiting_reward_input_type", None)
-    context.user_data.pop("current_quiz_id_for_reward_setup", None)
-    context.user_data.pop("awaiting", None)  # Legacy reward structure flag
-    context.user_data.pop("awaiting_reward_quiz_id", None)  # Legacy reward quiz ID flag
+    await redis_client.delete_user_data_key(user_id, "awaiting_reward_input_type")
+    await redis_client.delete_user_data_key(user_id, "current_quiz_id_for_reward_setup")
+    await redis_client.delete_user_data_key(user_id, "awaiting")  # Legacy reward structure flag
+    await redis_client.delete_user_data_key(user_id, "awaiting_reward_quiz_id")  # Legacy reward quiz ID flag
 
     # Clear quiz creation specific data
-    context.user_data.pop("topic", None)
-    context.user_data.pop("num_questions", None)
-    context.user_data.pop("context_text", None)
-    context.user_data.pop(
-        "duration_seconds", None
-    )  # Ensure any old duration is cleared
-    context.user_data.pop("awaiting_duration_input", None)  # Clear this flag as well
+    await redis_client.delete_user_data_key(user_id, "topic")
+    await redis_client.delete_user_data_key(user_id, "num_questions")
+    await redis_client.delete_user_data_key(user_id, "context_text")
+    await redis_client.delete_user_data_key(user_id, "duration_seconds")  # Ensure any old duration is cleared
+    await redis_client.delete_user_data_key(user_id, "awaiting_duration_input")  # Clear this flag as well
 
-    logger.info(
-        f"User_data AFTER cleaning for user {user.id} at quiz creation start: {context.user_data}"
-    )
+    # logger.info(
+    #     f"User_data AFTER cleaning for user {user_id} at quiz creation start: {context.user_data}"
+    # ) # Cannot log context.user_data directly anymore
 
     if chat_type != "private":
         logger.info(
-            f"User {user.id} started quiz creation from group chat {update.effective_chat.id}. Will DM."
+            f"User {user_id} started quiz creation from group chat {update.effective_chat.id}. Will DM."
         )
         await update.message.reply_text(
             f"@{user.username}, let's create a quiz! I'll message you privately to set it up."
         )
         await context.bot.send_message(
-            chat_id=user.id, text="Great—what topic would you like your quiz to cover?"
+            chat_id=user_id, text="Great—what topic would you like your quiz to cover?"
         )
-        context.user_data["group_chat_id"] = update.effective_chat.id
+        await redis_client.set_user_data_key(user_id, "group_chat_id", update.effective_chat.id)
         logger.info(
-            f"Stored group_chat_id {update.effective_chat.id} for user {user.id}. user_data: {context.user_data}"
+            f"Stored group_chat_id {update.effective_chat.id} for user {user_id}."
         )
         return TOPIC
     else:
-        logger.info(f"User {user.id} started quiz creation directly in private chat.")
+        logger.info(f"User {user_id} started quiz creation directly in private chat.")
         await update.message.reply_text(
             "Great—what topic would you like your quiz to cover?"
         )
         # Clear any potential leftover group_chat_id if starting fresh in DM
-        if "group_chat_id" in context.user_data:
-            del context.user_data["group_chat_id"]
-        logger.info(f"User {user.id} in private chat. user_data: {context.user_data}")
+        await redis_client.delete_user_data_key(user_id, "group_chat_id")
+        logger.info(f"User {user_id} in private chat.")
         return TOPIC
 
 
 async def topic_received(update, context):
+    user_id = update.effective_user.id
+    redis_client = RedisClient()
     logger.info(
-        f"Received topic: {update.message.text} from user {update.effective_user.id}"
+        f"Received topic: {update.message.text} from user {user_id}"
     )
-    context.user_data["topic"] = update.message.text.strip()
+    await redis_client.set_user_data_key(user_id, "topic", update.message.text.strip())
     await update.message.reply_text("How many questions? (send a number)")
     return SIZE
 
 
 async def size_received(update, context):
+    user_id = update.effective_user.id
+    redis_client = RedisClient()
     logger.info(
-        f"Received size: {update.message.text} from user {update.effective_user.id}"
+        f"Received size: {update.message.text} from user {user_id}"
     )
     try:
         n = int(update.message.text.strip())
     except ValueError:
         await update.message.reply_text("Please send a valid number of questions.")
         return SIZE
-    context.user_data["num_questions"] = n
+    await redis_client.set_user_data_key(user_id, "num_questions", n)
     # ask for optional long text
     buttons = [
         [InlineKeyboardButton("Paste text", callback_data="paste")],
@@ -234,6 +239,8 @@ async def size_received(update, context):
 
 
 async def context_choice(update, context):
+    user_id = update.effective_user.id
+    redis_client = RedisClient()
     choice = update.callback_query.data
     await update.callback_query.answer()
     if choice == "paste":
@@ -242,7 +249,7 @@ async def context_choice(update, context):
         )
         return CONTEXT_INPUT
     # skip
-    context.user_data["context_text"] = None
+    await redis_client.set_user_data_key(user_id, "context_text", None)
     # move to duration
     buttons = [
         [InlineKeyboardButton("Specify duration", callback_data="set_duration")],
@@ -253,15 +260,17 @@ async def context_choice(update, context):
         reply_markup=InlineKeyboardMarkup(buttons),
     )
     # Set the expectation that if user doesn't click a button, they might type a duration
-    context.user_data["awaiting_duration_input"] = True
+    await redis_client.set_user_data_key(user_id, "awaiting_duration_input", True)
     logger.info(
-        f"Showing duration options to user {update.effective_user.id} after context_choice, set awaiting_duration_input=True"
+        f"Showing duration options to user {user_id} after context_choice, set awaiting_duration_input=True"
     )
     return DURATION_CHOICE
 
 
 async def context_input(update, context):
-    context.user_data["context_text"] = update.message.text
+    user_id = update.effective_user.id
+    redis_client = RedisClient()
+    await redis_client.set_user_data_key(user_id, "context_text", update.message.text)
     # ask duration
     buttons = [
         [InlineKeyboardButton("Specify duration", callback_data="set_duration")],
@@ -272,50 +281,53 @@ async def context_input(update, context):
         reply_markup=InlineKeyboardMarkup(buttons),
     )
     # Set the expectation that if user doesn't click a button, they might type a duration
-    context.user_data["awaiting_duration_input"] = True
+    await redis_client.set_user_data_key(user_id, "awaiting_duration_input", True)
     logger.info(
-        f"Showing duration options to user {update.effective_user.id} after context_input, set awaiting_duration_input=True"
+        f"Showing duration options to user {user_id} after context_input, set awaiting_duration_input=True"
     )
     return DURATION_CHOICE
 
 
 async def duration_choice(update, context):
+    user_id = update.effective_user.id
+    redis_client = RedisClient()
     choice = update.callback_query.data
     await update.callback_query.answer()
-    logger.info(f"duration_choice: User {update.effective_user.id} selected {choice}")
+    logger.info(f"duration_choice: User {user_id} selected {choice}")
 
     if choice == "set_duration":
         # Set a special flag to identify duration input messages
-        context.user_data["awaiting_duration_input"] = True
+        await redis_client.set_user_data_key(user_id, "awaiting_duration_input", True)
         logger.info(
-            f"Setting awaiting_duration_input flag for user {update.effective_user.id}"
+            f"Setting awaiting_duration_input flag for user {user_id}"
         )
 
         await update.callback_query.message.reply_text(
             "Send duration, e.g. '5 minutes' or '2 hours'."
         )
         logger.info(
-            f"duration_choice: Returning DURATION_INPUT state for user {update.effective_user.id}"
+            f"duration_choice: Returning DURATION_INPUT state for user {user_id}"
         )
         return DURATION_INPUT
     # skip ("skip_duration")
-    context.user_data["duration_seconds"] = None  # Explicitly set to None if skipped
+    await redis_client.set_user_data_key(user_id, "duration_seconds", None)  # Explicitly set to None if skipped
     # Clear the flag if it was set and then skipped via button
-    context.user_data.pop("awaiting_duration_input", None)
+    await redis_client.delete_user_data_key(user_id, "awaiting_duration_input")
     logger.info(
-        f"duration_choice: User {update.effective_user.id} skipped duration, duration_seconds set to None. Going to confirm_prompt"
+        f"duration_choice: User {user_id} skipped duration, duration_seconds set to None. Going to confirm_prompt"
     )
     # preview
-    return await confirm_prompt(update, context)
+    return await confirm_prompt(update, context) # confirm_prompt will need redis_client too
 
 
 async def duration_input(update, context):
     user_id = update.effective_user.id
+    redis_client = RedisClient()
     message_text = update.message.text
     logger.info(
         f"Attempting to process DURATION_INPUT: '{message_text}' from user {user_id}"
     )
-    logger.debug(f"User data for {user_id} at duration_input: {context.user_data}")
+    # logger.debug(f"User data for {user_id} at duration_input: {context.user_data}") # Cannot log context.user_data
     txt = message_text.strip().lower()
 
     parsed_successfully = False
@@ -331,7 +343,7 @@ async def duration_input(update, context):
         else:  # minute or min
             secs = val * 60
 
-        context.user_data["duration_seconds"] = secs
+        await redis_client.set_user_data_key(user_id, "duration_seconds", secs)
         logger.info(
             f"Successfully parsed duration (primary regex) for user {user_id}: {secs} seconds from '{message_text}'"
         )
@@ -343,27 +355,26 @@ async def duration_input(update, context):
             val = int(m_val_search.group(1))
             if "hour" in txt or "hr" in txt:
                 secs = val * 3600
-                context.user_data["duration_seconds"] = secs
+                await redis_client.set_user_data_key(user_id, "duration_seconds", secs)
                 logger.info(
                     f"Successfully parsed duration (fallback - hours) for user {user_id}: {secs} seconds from '{message_text}'"
                 )
                 parsed_successfully = True
             elif "minute" in txt or "min" in txt:
                 secs = val * 60
-                context.user_data["duration_seconds"] = secs
+                await redis_client.set_user_data_key(user_id, "duration_seconds", secs)
                 logger.info(
                     f"Successfully parsed duration (fallback - minutes) for user {user_id}: {secs} seconds from '{message_text}'"
                 )
                 parsed_successfully = True
 
     if parsed_successfully:
-        context.user_data.pop(
-            "awaiting_duration_input", None
-        )  # Clear flag as input is now processed
+        await redis_client.delete_user_data_key(user_id, "awaiting_duration_input")  # Clear flag as input is now processed
+        duration_seconds_val = await redis_client.get_user_data_key(user_id, 'duration_seconds')
         logger.info(
-            f"duration_input: Parsed successfully, proceeding to confirm_prompt for user {user_id}. duration_seconds: {context.user_data.get('duration_seconds')}"
+            f"duration_input: Parsed successfully, proceeding to confirm_prompt for user {user_id}. duration_seconds: {duration_seconds_val}"
         )
-        return await confirm_prompt(update, context)
+        return await confirm_prompt(update, context) # confirm_prompt will need redis_client too
     else:
         # If parsing failed either way
         await update.message.reply_text(
@@ -375,10 +386,19 @@ async def duration_input(update, context):
 
 
 async def confirm_prompt(update, context):
-    topic = context.user_data["topic"]
-    n = context.user_data["num_questions"]
-    has_ctx = bool(context.user_data.get("context_text"))
-    dur = context.user_data.get("duration_seconds")
+    user_id = update.effective_user.id
+    redis_client = RedisClient()
+
+    topic = await redis_client.get_user_data_key(user_id, "topic")
+    n = await redis_client.get_user_data_key(user_id, "num_questions")
+    context_text_val = await redis_client.get_user_data_key(user_id, "context_text")
+    has_ctx = bool(context_text_val)
+    dur = await redis_client.get_user_data_key(user_id, "duration_seconds")
+
+    # Ensure n and dur are not None before using in f-string or arithmetic
+    n = n if n is not None else 0 # Default to 0 if not found, or handle error
+    topic = topic if topic is not None else "[Unknown Topic]" # Default if not found
+
     text = f"Ready to generate a {n}-question quiz on '{topic}'"
     text += " based on your text" if has_ctx else ""
     text += f", open for {dur//60} minutes" if dur else ""
@@ -396,36 +416,51 @@ async def confirm_prompt(update, context):
 
 
 async def confirm_choice(update, context):
+    user_id = update.effective_user.id
+    redis_client = RedisClient()
     choice = update.callback_query.data
     await update.callback_query.answer()
+
     if choice == "no":
         await update.callback_query.message.reply_text("Quiz creation canceled.")
-        context.user_data.clear()  # Clear data on cancellation
+        await redis_client.clear_user_data(user_id)  # Clear data on cancellation
         return ConversationHandler.END
+
     # yes: generate and post
     await update.callback_query.message.reply_text("🛠 Generating your quiz—one moment…")
-    data = context.user_data
+
+    # Fetch all necessary data from Redis
+    topic = await redis_client.get_user_data_key(user_id, "topic")
+    num_questions = await redis_client.get_user_data_key(user_id, "num_questions")
+    context_text = await redis_client.get_user_data_key(user_id, "context_text")
+    group_chat_id = await redis_client.get_user_data_key(user_id, "group_chat_id")
+    duration_seconds = await redis_client.get_user_data_key(user_id, "duration_seconds")
+
+    # Handle cases where essential data might be missing (e.g., if Redis errored or keys expired)
+    if not topic or num_questions is None: # num_questions can be 0, so check for None
+        logger.error(f"Missing essential quiz data for user {user_id} in confirm_choice. Topic: {topic}, NumQ: {num_questions}")
+        await update.callback_query.message.reply_text("Sorry, some quiz details were lost. Please start over.")
+        await redis_client.clear_user_data(user_id)
+        return ConversationHandler.END
+
     quiz_text = await generate_quiz(
-        data["topic"], data["num_questions"], data.get("context_text")
+        topic, num_questions, context_text
     )
 
-    group_chat_id_to_use = data.get("group_chat_id", update.effective_chat.id)
+    group_chat_id_to_use = group_chat_id if group_chat_id else update.effective_chat.id
 
     # Call process_questions with duration_seconds
     await process_questions(
         update,
         context,
-        data["topic"],
+        topic,
         quiz_text,
         group_chat_id_to_use,
-        duration_seconds=data.get("duration_seconds"),  # Pass duration_seconds directly
+        duration_seconds=duration_seconds,  # Pass duration_seconds directly
     )
 
-    # schedule_auto_distribution is already called within process_questions if end_time is set
-    # So, no need to call it separately here unless the logic changes.
-
     # Clear conversation data for quiz creation
-    context.user_data.clear()
+    await redis_client.clear_user_data(user_id)
     return ConversationHandler.END
 
 
@@ -433,6 +468,8 @@ async def start_reward_setup_callback(update: Update, context: CallbackContext):
     """Handles the 'Setup Rewards' button press and presents reward configuration options."""
     query = update.callback_query
     await query.answer()  # Acknowledge the button press
+    user_id = update.effective_user.id
+    redis_client = RedisClient()
 
     try:
         action, quiz_id = query.data.split(":")
@@ -451,10 +488,10 @@ async def start_reward_setup_callback(update: Update, context: CallbackContext):
         )
         return
 
-    context.user_data["current_quiz_id_for_reward_setup"] = quiz_id
+    await redis_client.set_user_data_key(user_id, "current_quiz_id_for_reward_setup", quiz_id)
 
     logger.info(
-        f"User {update.effective_user.id} starting reward setup for quiz {quiz_id}"
+        f"User {user_id} starting reward setup for quiz {quiz_id}"
     )
 
     keyboard = [
@@ -498,6 +535,8 @@ async def handle_reward_method_choice(update: Update, context: CallbackContext):
     """Handles the choice of reward method (WTA, Top3, Custom, Manual)."""
     query = update.callback_query
     await query.answer()
+    user_id = update.effective_user.id
+    redis_client = RedisClient()
 
     try:
         _, method, quiz_id = query.data.split(":")
@@ -508,39 +547,39 @@ async def handle_reward_method_choice(update: Update, context: CallbackContext):
         await query.edit_message_text("Error: Invalid selection. Please try again.")
         return
 
-    context.user_data["current_quiz_id_for_reward_setup"] = quiz_id  # Ensure it's set
+    await redis_client.set_user_data_key(user_id, "current_quiz_id_for_reward_setup", quiz_id)  # Ensure it's set
 
     if method == "wta":
-        context.user_data["awaiting_reward_input_type"] = "wta_amount"
+        await redis_client.set_user_data_key(user_id, "awaiting_reward_input_type", "wta_amount")
         await query.edit_message_text(
             f"🏆 Winner Takes All selected for Quiz {quiz_id}.\nPlease enter the total prize amount (e.g., '5 NEAR', '10 USDT')."
         )
     elif method == "top3":
-        context.user_data["awaiting_reward_input_type"] = "top3_details"
+        await redis_client.set_user_data_key(user_id, "awaiting_reward_input_type", "top3_details")
         await query.edit_message_text(
             f"🥇🥈🥉 Reward Top 3 selected for Quiz {quiz_id}.\nPlease describe the rewards for 1st, 2nd, and 3rd place (e.g., '3 NEAR for 1st, 2 NEAR for 2nd, 1 NEAR for 3rd')."
         )
     elif method == "custom":
-        context.user_data["awaiting_reward_input_type"] = "custom_details"
+        await redis_client.set_user_data_key(user_id, "awaiting_reward_input_type", "custom_details")
         await query.edit_message_text(
             f"✨ Custom Setup for Quiz {quiz_id}.\nFor now, please describe the reward structure manually (e.g., '1st: 5N, 2nd-5th: 1N each')."
         )
     elif method == "manual":
-        context.user_data["awaiting_reward_input_type"] = "manual_free_text"
+        await redis_client.set_user_data_key(user_id, "awaiting_reward_input_type", "manual_free_text")
         await query.edit_message_text(
             f"✍️ Manual Input selected for Quiz {quiz_id}.\nPlease type the reward structure (e.g., '2 Near for 1st, 1 Near for 2nd')."
         )
     elif method == "cancel_setup":
         await query.edit_message_text(f"Reward setup for Quiz {quiz_id} cancelled.")
-        context.user_data.pop("current_quiz_id_for_reward_setup", None)
-        context.user_data.pop("awaiting_reward_input_type", None)
+        await redis_client.delete_user_data_key(user_id, "current_quiz_id_for_reward_setup")
+        await redis_client.delete_user_data_key(user_id, "awaiting_reward_input_type")
         return ConversationHandler.END  # Or just return if not in a conv
     else:
         await query.edit_message_text("Invalid choice. Please try again.")
         return
 
     logger.info(
-        f"User {update.effective_user.id} selected reward method {method} for quiz {quiz_id}. User_data: {context.user_data}"
+        f"User {user_id} selected reward method {method} for quiz {quiz_id}." # Cannot log user_data directly
     )
     # Subsequent input will be handled by private_message_handler
     # based on 'awaiting_reward_input_type'.
@@ -674,15 +713,17 @@ async def private_message_handler(update: Update, context: CallbackContext):
     """Route private text messages to the appropriate handler."""
     user_id = update.effective_user.id
     message_text = update.message.text
+    redis_client = RedisClient() # Instantiate RedisClient
+
     logger.info(
         f"PRIVATE_MESSAGE_HANDLER received: '{message_text}' from user {user_id}"
     )
-    logger.info(
-        f"User_data for {user_id} in private_message_handler: {context.user_data}"
-    )
+    # logger.info(
+    #     f"User_data for {user_id} in private_message_handler: {context.user_data}" # Cannot log context.user_data
+    # )
 
     # Check if awaiting payment hash
-    quiz_id_awaiting_hash = context.user_data.get("awaiting_payment_hash_for_quiz_id")
+    quiz_id_awaiting_hash = await redis_client.get_user_data_key(user_id, "awaiting_payment_hash_for_quiz_id")
     if quiz_id_awaiting_hash:
         payment_hash = message_text.strip()
         logger.info(
@@ -781,12 +822,12 @@ async def private_message_handler(update: Update, context: CallbackContext):
                 f"⚠️ There was an issue saving your transaction hash for Quiz ID {quiz_id_awaiting_hash}. "
                 "Please try sending the hash again or contact support."
             )
-        context.user_data.pop("awaiting_payment_hash_for_quiz_id", None)
+        await redis_client.delete_user_data_key(user_id, "awaiting_payment_hash_for_quiz_id")
         return
 
     # Check for reward input (WTA, Top3, Custom, Manual)
-    awaiting_reward_type = context.user_data.get("awaiting_reward_input_type")
-    quiz_id_for_setup = context.user_data.get("current_quiz_id_for_reward_setup")
+    awaiting_reward_type = await redis_client.get_user_data_key(user_id, "awaiting_reward_input_type")
+    quiz_id_for_setup = await redis_client.get_user_data_key(user_id, "current_quiz_id_for_reward_setup")
 
     if awaiting_reward_type and quiz_id_for_setup:
         logger.info(
@@ -870,11 +911,13 @@ async def private_message_handler(update: Update, context: CallbackContext):
                 )
 
                 # Transition to awaiting payment hash state
-                context.user_data["awaiting_payment_hash_for_quiz_id"] = (
-                    quiz_id_for_setup
-                )
+                await redis_client.set_user_data_key(user_id, "awaiting_payment_hash_for_quiz_id", quiz_id_for_setup)
+                # Clear the reward input type flag as we are now awaiting hash
+                await redis_client.delete_user_data_key(user_id, "awaiting_reward_input_type")
+                await redis_client.delete_user_data_key(user_id, "current_quiz_id_for_reward_setup")
+
                 logger.info(
-                    f"Set 'awaiting_payment_hash_for_quiz_id' to {quiz_id_for_setup} for user {user_id}. Current user_data: {context.user_data}"
+                    f"Set 'awaiting_payment_hash_for_quiz_id' to {quiz_id_for_setup} for user {user_id}." # Cannot log user_data
                 )
 
             except asyncio.TimeoutError:
@@ -907,12 +950,13 @@ async def private_message_handler(update: Update, context: CallbackContext):
         return
 
     # Check for duration input flag
-    if context.user_data.get("awaiting_duration_input"):
+    is_awaiting_duration_input = await redis_client.get_user_data_key(user_id, "awaiting_duration_input")
+    if is_awaiting_duration_input:
         logger.info(
             f"User {user_id} is awaiting duration input. Processing duration: '{message_text}' in private_message_handler"
         )
         # Clear the flag
-        context.user_data.pop("awaiting_duration_input", None)  # Changed to pop
+        await redis_client.delete_user_data_key(user_id, "awaiting_duration_input")
 
         # Parse duration input
         txt = message_text.strip().lower()
@@ -921,7 +965,7 @@ async def private_message_handler(update: Update, context: CallbackContext):
             val = int(m.group(1))
             unit = m.group(2)
             secs = val * (3600 if unit.startswith("hour") else 60)
-            context.user_data["duration_seconds"] = secs
+            await redis_client.set_user_data_key(user_id, "duration_seconds", secs)
             logger.info(
                 f"Successfully parsed duration for user {user_id}: {secs} seconds from '{message_text}'"
             )
@@ -931,26 +975,26 @@ async def private_message_handler(update: Update, context: CallbackContext):
             if m and ("minute" in txt.lower() or "min" in txt.lower()):
                 val = int(m.group(1))
                 secs = val * 60
-                context.user_data["duration_seconds"] = secs
+                await redis_client.set_user_data_key(user_id, "duration_seconds", secs)
                 logger.info(
                     f"Flexibly parsed duration: {secs} seconds from '{message_text}'"
                 )
             elif m and "hour" in txt.lower():
                 val = int(m.group(1))
                 secs = val * 3600
-                context.user_data["duration_seconds"] = secs
+                await redis_client.set_user_data_key(user_id, "duration_seconds", secs)
                 logger.info(
                     f"Flexibly parsed duration: {secs} seconds from '{message_text}'"
                 )
             else:
-                context.user_data["duration_seconds"] = 300  # Default to 5 minutes
+                await redis_client.set_user_data_key(user_id, "duration_seconds", 300)  # Default to 5 minutes
                 logger.info(
                     f"Could not parse duration from '{message_text}'. Using default: 300 seconds"
                 )
                 await update.message.reply_text(
                     "I couldn't understand that format. Using 5 minutes by default."
                 )
-        return await confirm_prompt(update, context)
+        return await confirm_prompt(update, context) # confirm_prompt needs redis_client
 
     logger.info(
         f"Message from user {user_id} ('{message_text}') is NOT for reward structure or duration input. Checking ConversationHandler."

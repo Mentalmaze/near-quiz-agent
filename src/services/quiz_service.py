@@ -13,6 +13,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 import traceback
 from utils.config import Config
+from utils.redis_client import RedisClient
 
 logger = logging.getLogger(__name__)
 
@@ -357,10 +358,9 @@ async def process_questions(
 
     # Remove old awaiting flags if they exist, not strictly necessary here
     # as the new flow will be initiated by the button.
-    if "awaiting" in context.user_data:
-        del context.user_data["awaiting"]
-    if "awaiting_reward_quiz_id" in context.user_data:
-        del context.user_data["awaiting_reward_quiz_id"]
+    user_id = str(update.effective_user.id)
+    RedisClient.delete_user_data_key(user_id, "awaiting")
+    RedisClient.delete_user_data_key(user_id, "awaiting_reward_quiz_id")
 
     logger.info(
         f"Sent reward setup prompt for quiz ID: {quiz_id} to user {update.effective_user.id}"
@@ -1011,36 +1011,33 @@ async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def handle_reward_structure(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Process reward structure from quiz creator in private chat."""
     # Only proceed if user_data indicates we're awaiting reward structure or wallet steps
+    user_id = str(update.effective_user.id) # Added user_id for RedisClient
     valid_states = (
         "reward_structure",
         "wallet_address",
         "signature",
         "transaction_hash",
     )
-    if context.user_data.get("awaiting") not in valid_states:
+    if RedisClient.get_user_data_key(user_id, "awaiting") not in valid_states:
         return
     # Skip if this isn't a private chat
     if update.effective_chat.type != "private":
         return
     # Handle wallet linking or transaction steps
-    if context.user_data.get("awaiting") in (
-        "wallet_address",
-        "signature",
-        "transaction_hash",
-    ):
+    current_awaiting_state = RedisClient.get_user_data_key(user_id, "awaiting")
+    if current_awaiting_state in ("wallet_address", "signature", "transaction_hash"):
         from services.user_service import handle_wallet_address, handle_signature
-        from services.blockchain import BlockchainMonitor
+        # BlockchainMonitor is imported locally in handle_transaction_hash if needed
 
-        if context.user_data.get("awaiting") == "wallet_address":
+        if current_awaiting_state == "wallet_address":
             await handle_wallet_address(update, context)
-        elif context.user_data.get("awaiting") == "signature":
-            await handle_signature(update, context)
-        elif context.user_data.get("awaiting") == "transaction_hash":
+        elif current_awaiting_state == "signature":
+            await handle_signature(update, context) # Note: handle_signature is a pass-through
+        elif current_awaiting_state == "transaction_hash":
             await handle_transaction_hash(update, context)
         return
 
     text = update.message.text
-    user_id = str(update.effective_user.id)
 
     # Parse amounts from text, e.g. '2 Near for 1st, 1 Near for 2nd'
     amounts = re.findall(r"(\d+)\s*Near", text, re.IGNORECASE)
@@ -1116,8 +1113,8 @@ async def handle_reward_structure(update: Update, context: ContextTypes.DEFAULT_
     await safe_send_message(context.bot, update.effective_chat.id, msg)
 
     # Now expect transaction hash next
-    context.user_data["awaiting"] = "transaction_hash"
-    context.user_data["quiz_id"] = quiz_id
+    RedisClient.set_user_data_key(user_id, "awaiting", "transaction_hash")
+    RedisClient.set_user_data_key(user_id, "quiz_id", quiz_id)
 
     # Announce in group chat
     try:
@@ -1145,7 +1142,8 @@ async def handle_reward_structure(update: Update, context: ContextTypes.DEFAULT_
 async def handle_transaction_hash(update: Update, context: CallbackContext):
     """Process transaction hash verification from quiz creator."""
     tx_hash = update.message.text.strip()
-    quiz_id = context.user_data.get("quiz_id")
+    user_id = str(update.effective_user.id) # Added user_id for RedisClient
+    quiz_id = RedisClient.get_user_data_key(user_id, "quiz_id")
 
     if not quiz_id:
         await safe_send_message(
@@ -1154,8 +1152,7 @@ async def handle_transaction_hash(update: Update, context: CallbackContext):
             "Sorry, I couldn't determine which quiz you're trying to verify. Please try setting up the reward structure again.",
         )
         # Clear awaiting state
-        if "awaiting" in context.user_data:
-            del context.user_data["awaiting"]
+        RedisClient.delete_user_data_key(user_id, "awaiting")
         return
 
     # Process message - show typing action while verifying
@@ -1178,8 +1175,7 @@ async def handle_transaction_hash(update: Update, context: CallbackContext):
             "❌ Sorry, I couldn't access the blockchain monitor to verify your transaction. Please wait for automatic verification or contact an administrator.",
         )
         # Clear awaiting state
-        if "awaiting" in context.user_data:
-            del context.user_data["awaiting"]
+        RedisClient.delete_user_data_key(user_id, "awaiting")
         return
 
     # Verify the transaction
@@ -1222,8 +1218,7 @@ async def handle_transaction_hash(update: Update, context: CallbackContext):
         )
 
     # Clear awaiting state
-    if "awaiting" in context.user_data:
-        del context.user_data["awaiting"]
+    RedisClient.delete_user_data_key(user_id, "awaiting")
 
 
 async def get_winners(update: Update, context: CallbackContext):

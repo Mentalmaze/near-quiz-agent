@@ -5,6 +5,7 @@ from telegram.ext import CallbackContext
 from models.user import User
 from store.database import SessionLocal
 from utils.telegram_helpers import safe_send_message
+from utils.redis_client import RedisClient
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,7 @@ async def link_wallet(update: Update, context: CallbackContext):
         "Please send me your NEAR wallet address (e.g., 'yourname.near').",
     )
     # Set user state to wait for wallet address
-    context.user_data["awaiting"] = "wallet_address"
+    RedisClient.set_user_data_key(str(update.effective_user.id), "awaiting", "wallet_address")
 
 
 async def handle_wallet_address(update: Update, context: CallbackContext):
@@ -59,8 +60,7 @@ async def handle_wallet_address(update: Update, context: CallbackContext):
             session.close()
 
         # Clear awaiting state
-        if "awaiting" in context.user_data:
-            del context.user_data["awaiting"]
+        RedisClient.delete_user_data_key(user_id, "awaiting")
 
         # Confirm wallet link to the user
         await safe_send_message(
