@@ -701,27 +701,26 @@ async def private_message_handler(update: Update, context: CallbackContext):
     """Route private text messages to the appropriate handler."""
     user_id = str(update.effective_user.id)  # Ensure user_id is string
     message_text = update.message.text
-    redis_client = RedisClient()
+    # redis_client = RedisClient() # Removed instance creation
 
     logger.info(
         f"PRIVATE_MESSAGE_HANDLER received: '{message_text}' from user {user_id}"
     )
 
     # Check if awaiting wallet address
-    is_awaiting_wallet = await redis_client.get_user_data_key(user_id, "awaiting")
-    logger.info(f"User {user_id} 'awaiting' state from Redis: {is_awaiting_wallet}") # Added logging
+    is_awaiting_wallet = await RedisClient.get_user_data_key(
+        user_id, "awaiting"
+    )  # Use static method
+    logger.info(f"User {user_id} 'awaiting' state from Redis: {is_awaiting_wallet}")
     if is_awaiting_wallet == "wallet_address":
         logger.info(
             f"User {user_id} is awaiting wallet_address. Calling service_handle_wallet_address."
         )
-        # Clear the state immediately before calling the handler to avoid re-entry on error/retry within handler
-        # The handler itself will clear it again on success, which is fine.
-        # await redis_client.delete_user_data_key(user_id, "awaiting") # Let service_handle_wallet_address manage this state
         await service_handle_wallet_address(update, context)
         return
 
     # Check if awaiting payment hash
-    quiz_id_awaiting_hash = await redis_client.get_user_data_key(
+    quiz_id_awaiting_hash = await RedisClient.get_user_data_key(  # Use static method
         user_id, "awaiting_payment_hash_for_quiz_id"
     )
     if quiz_id_awaiting_hash:
@@ -744,13 +743,13 @@ async def private_message_handler(update: Update, context: CallbackContext):
                     session.query(Quiz).filter(Quiz.id == quiz_id_awaiting_hash).first()
                 )
                 if quiz and quiz.group_chat_id:
+                    # ... (rest of the announcement logic remains the same)
                     announce_text = "@all \n"
                     announce_text += f"📣 New quiz '**{_escape_markdown_v2_specials(quiz.topic)}**' is now active! 🎯\n\n"
 
                     num_questions = len(quiz.questions) if quiz.questions else "N/A"
                     announce_text += f"📚 **{num_questions} Questions**\n"
 
-                    # Include reward structure if available
                     schedule = quiz.reward_schedule or {}
                     reward_details_text = schedule.get("details_text", "")
                     reward_type = schedule.get("type", "")
@@ -773,7 +772,6 @@ async def private_message_handler(update: Update, context: CallbackContext):
                         announce_text += f"⏳ **Ends**: No specific end time set.\n"
 
                     announce_text += "\nType `/playquiz` to participate!"
-
                     logger.info(
                         f"Attempting to send announcement to group {quiz.group_chat_id}:\n{announce_text}"
                     )
@@ -788,7 +786,6 @@ async def private_message_handler(update: Update, context: CallbackContext):
                         logger.error(
                             f"Failed to send announcement with MarkdownV2: {e}. Sending as plain text."
                         )
-                        # Fallback to plain text if MarkdownV2 fails
                         plain_announce_text = "@all \n"
                         plain_announce_text += (
                             f"New quiz '{quiz.topic}' is now active! \n"
@@ -811,27 +808,25 @@ async def private_message_handler(update: Update, context: CallbackContext):
                         await context.bot.send_message(
                             chat_id=quiz.group_chat_id, text=plain_announce_text
                         )
-
             except Exception as e:
                 logger.error(f"Error during quiz announcement: {e}", exc_info=True)
             finally:
                 session.close()
-
         else:
             await update.message.reply_text(
                 f"⚠️ There was an issue saving your transaction hash for Quiz ID {quiz_id_awaiting_hash}. "
                 "Please try sending the hash again or contact support."
             )
-        await redis_client.delete_user_data_key(
+        await RedisClient.delete_user_data_key(  # Use static method
             user_id, "awaiting_payment_hash_for_quiz_id"
         )
         return
 
     # Check for reward input (WTA, Top3, Custom, Manual)
-    awaiting_reward_type = await redis_client.get_user_data_key(
+    awaiting_reward_type = await RedisClient.get_user_data_key(  # Use static method
         user_id, "awaiting_reward_input_type"
     )
-    quiz_id_for_setup = await redis_client.get_user_data_key(
+    quiz_id_for_setup = await RedisClient.get_user_data_key(  # Use static method
         user_id, "current_quiz_id_for_reward_setup"
     )
 
@@ -840,13 +835,13 @@ async def private_message_handler(update: Update, context: CallbackContext):
             f"Handling reward input type: {awaiting_reward_type} for quiz {quiz_id_for_setup} from user {user_id}. Message: '{message_text}'"
         )
 
-        # Save reward details to DB
         save_reward_success = await save_quiz_reward_details(
             quiz_id_for_setup, awaiting_reward_type, message_text
         )
 
         if save_reward_success:
-            friendly_method_name = "your reward details"  # Default
+            # ... (friendly_method_name, reward_confirmation_content, _parse_reward_details_for_total, deposit_instructions logic remains the same)
+            friendly_method_name = "your reward details"
             if awaiting_reward_type == "wta_amount":
                 friendly_method_name = "Winner Takes All amount"
             elif awaiting_reward_type == "top3_details":
@@ -863,13 +858,10 @@ async def private_message_handler(update: Update, context: CallbackContext):
             logger.info(
                 f"Reward confirmation content prepared: {reward_confirmation_content}"
             )
-
-            # Attempt to parse for total amount and currency
             total_amount, currency = _parse_reward_details_for_total(
                 message_text, awaiting_reward_type
             )
             logger.info(f"Parsed reward: Amount={total_amount}, Currency={currency}")
-
             if total_amount is not None and currency:
                 fee = round(total_amount * 0.02, 6)
                 total_with_fee = round(total_amount + fee, 6)
@@ -885,7 +877,6 @@ async def private_message_handler(update: Update, context: CallbackContext):
                     f"Once sent, please reply with the *transaction hash*."
                 )
             logger.info(f"Deposit instructions prepared: {deposit_instructions}")
-
             prompt_for_hash_message = "I'm now awaiting the transaction hash."
 
             try:
@@ -894,7 +885,7 @@ async def private_message_handler(update: Update, context: CallbackContext):
                 )
                 await asyncio.wait_for(
                     update.message.reply_text(text=reward_confirmation_content),
-                    timeout=30.0,  # Increased timeout
+                    timeout=30.0,
                 )
                 logger.info(
                     f"Reward confirmation sent. Attempting to send deposit instructions for {awaiting_reward_type} to user {user_id}."
@@ -903,35 +894,31 @@ async def private_message_handler(update: Update, context: CallbackContext):
                     update.message.reply_text(
                         text=deposit_instructions, parse_mode="Markdown"
                     ),
-                    timeout=30.0,  # Increased timeout
+                    timeout=30.0,
                 )
                 logger.info(
                     f"Deposit instructions sent. Attempting to send prompt for hash for {awaiting_reward_type} to user {user_id}."
                 )
                 await asyncio.wait_for(
                     update.message.reply_text(text=prompt_for_hash_message),
-                    timeout=30.0,  # Increased timeout
+                    timeout=30.0,
                 )
                 logger.info(
                     f"All reward setup messages sent successfully for {awaiting_reward_type} to user {user_id}."
                 )
 
-                # Transition to awaiting payment hash state
-                await redis_client.set_user_data_key(
+                await RedisClient.set_user_data_key(  # Use static method
                     user_id, "awaiting_payment_hash_for_quiz_id", quiz_id_for_setup
                 )
-                # Clear the reward input type flag as we are now awaiting hash
-                await redis_client.delete_user_data_key(
+                await RedisClient.delete_user_data_key(  # Use static method
                     user_id, "awaiting_reward_input_type"
                 )
-                await redis_client.delete_user_data_key(
+                await RedisClient.delete_user_data_key(  # Use static method
                     user_id, "current_quiz_id_for_reward_setup"
                 )
-
                 logger.info(
-                    f"Set 'awaiting_payment_hash_for_quiz_id' to {quiz_id_for_setup} for user {user_id}."  # Cannot log user_data
+                    f"Set 'awaiting_payment_hash_for_quiz_id' to {quiz_id_for_setup} for user {user_id}."
                 )
-
             except asyncio.TimeoutError:
                 logger.error(
                     f"Timeout occurred during reward setup/payment prompt for {awaiting_reward_type} to user {user_id}"
@@ -954,25 +941,25 @@ async def private_message_handler(update: Update, context: CallbackContext):
             await update.message.reply_text(
                 "⚠️ There was an issue saving your reward details. Please try sending them again."
             )
-            # Do not clear state, allow user to retry sending the details.
-
         logger.info(
             f"Returning from private_message_handler after processing reward input for {awaiting_reward_type} for user {user_id}."
         )
         return
 
     # Check for duration input flag
-    is_awaiting_duration_input = await redis_client.get_user_data_key(
-        user_id, "awaiting_duration_input"
+    is_awaiting_duration_input = (
+        await RedisClient.get_user_data_key(  # Use static method
+            user_id, "awaiting_duration_input"
+        )
     )
     if is_awaiting_duration_input:
         logger.info(
             f"User {user_id} is awaiting duration input. Processing duration: '{message_text}' in private_message_handler"
         )
-        # Clear the flag
-        await redis_client.delete_user_data_key(user_id, "awaiting_duration_input")
+        await RedisClient.delete_user_data_key(
+            user_id, "awaiting_duration_input"
+        )  # Use static method
 
-        # Parse duration input
         txt = message_text.strip().lower()
         m = re.match(r"(\d+)\s*(minute|hour|min)s?", txt)
         if m:
@@ -980,26 +967,24 @@ async def private_message_handler(update: Update, context: CallbackContext):
             unit = m.group(2)
             if unit in ("minute", "min"):
                 secs = val * 60
-            elif unit == "hour": # Corrected syntax error here: changed ) to :
+            elif unit == "hour":
                 secs = val * 3600
-            await redis_client.set_user_data_key(user_id, "duration_seconds", secs)
+            await RedisClient.set_user_data_key(
+                user_id, "duration_seconds", secs
+            )  # Use static method
             logger.info(
                 f"Successfully parsed duration '{message_text}' to {secs} seconds for user {user_id}. Proceeding to confirm_prompt."
             )
-            # Since this is a direct message, update.message should be valid
-            await confirm_prompt(update, context) # Call confirm_prompt directly
-            return # Return after handling duration input
+            await confirm_prompt(update, context)
+            return
         else:
-            # Handle cases where regex doesn't match, e.g., "30" or "1 day"
-            # For now, assume it's not a valid duration if it doesn't match common patterns
             logger.warning(
                 f"Could not parse duration input '{message_text}' from user {user_id} using primary regex. Replying with error."
             )
             await update.message.reply_text(
                 "Hmm, I didn't quite catch that duration. Please use a format like '10 minutes' or '2 hours'."
             )
-            # Do not clear awaiting_duration_input here, let user try again or use buttons
-            return # Return to stop further processing if duration was expected but not parsed
+            return
 
     logger.info(
         f"Message from user {user_id} ('{message_text}') is NOT for reward structure or duration input. Checking ConversationHandler."

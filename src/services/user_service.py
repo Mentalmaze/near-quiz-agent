@@ -26,14 +26,20 @@ async def link_wallet(update: Update, context: CallbackContext):
     await safe_send_message(
         context.bot,
         update.effective_chat.id,
-        "Please send me your NEAR wallet address (e.g., 'yourname.near').",
+        "Great. What wallet address would you be linking? Please send me your NEAR wallet address (e.g., 'yourname.near').",  # Changed prompt
     )
     # Set user state to wait for wallet address
     user_id_str = str(update.effective_user.id)
-    await RedisClient.set_user_data_key(
-        user_id_str, "awaiting", "wallet_address"
+    await RedisClient.set_user_data_key(user_id_str, "awaiting", "wallet_address")
+    logger.info(
+        f"User {user_id_str} state attempted to set to 'awaiting: wallet_address' in Redis."
     )
-    logger.info(f"User {user_id_str} state set to 'awaiting: wallet_address' in Redis.")
+
+    # Diagnostic: Immediately try to read back the value
+    read_back_state = await RedisClient.get_user_data_key(user_id_str, "awaiting")
+    logger.info(
+        f"User {user_id_str} diagnostic read back 'awaiting' state from Redis: {read_back_state}"
+    )
 
 
 async def handle_wallet_address(update: Update, context: CallbackContext):
