@@ -13,13 +13,39 @@ logger = logging.getLogger(__name__)
 
 async def link_wallet(update: Update, context: CallbackContext):
     """Handler for /linkwallet command - instructs user to link wallet via private message."""
-    # If this is a group chat, direct user to DM
+    user = update.effective_user
+    user_id_str = str(user.id)
+
     if update.effective_chat.type != "private":
-        await safe_send_message(
-            context.bot,
-            update.effective_chat.id,
-            f"@{update.effective_user.username}, please start a private chat with me to link your NEAR wallet securely.",
-        )
+        try:
+            # Inform in group chat
+            await safe_send_message(
+                context.bot,
+                update.effective_chat.id,
+                f"@{user.username}, I'll send you a private message to help you link your NEAR wallet securely.",
+            )
+            # Send DM
+            await safe_send_message(
+                context.bot,
+                user_id_str,  # Send to user's private chat
+                "Let's link your NEAR wallet. Please send me your wallet address (e.g., 'yourname.near').",
+            )
+            # Set user state to wait for wallet address
+            await RedisClient.set_user_data_key(
+                user_id_str, "awaiting", "wallet_address"
+            )
+            logger.info(
+                f"User {user_id_str} (from group chat {update.effective_chat.id}) state set to 'awaiting: wallet_address' in Redis after DM."
+            )
+        except Exception as e:
+            logger.error(
+                f"Failed to send DM or set Redis state for user {user_id_str} from group chat: {e}"
+            )
+            await safe_send_message(
+                context.bot,
+                update.effective_chat.id,
+                f"@{user.username}, I tried to send you a DM, but it failed. Please start a private chat with me to link your wallet.",
+            )
         return
 
     # This is already a private chat, prompt for wallet address
@@ -29,7 +55,6 @@ async def link_wallet(update: Update, context: CallbackContext):
         "Great. What wallet address would you be linking? Please send me your NEAR wallet address (e.g., 'yourname.near').",  # Changed prompt
     )
     # Set user state to wait for wallet address
-    user_id_str = str(update.effective_user.id)
     await RedisClient.set_user_data_key(user_id_str, "awaiting", "wallet_address")
     logger.info(
         f"User {user_id_str} state attempted to set to 'awaiting: wallet_address' in Redis."
