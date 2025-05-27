@@ -296,123 +296,239 @@ class BlockchainMonitor:
             successful_transfers = []
 
             # Process each winner according to reward schedule
-            for rank, winner_data in enumerate(winners, 1):
-                logger.debug(
-                    f"[distribute_rewards] Processing rank={rank}, data={winner_data}"
-                )
-                user_id = winner_data["user_id"]
-                user = session.query(User).filter(User.id == user_id).first()
-
-                # Skip if no wallet linked
-                if not user or not user.wallet_address:
-                    logger.warning(
-                        f"[distribute_rewards] User {user_id} (Username: {winner_data.get('username', 'N/A')}) has no wallet linked or user not found, skipping."
+            if (
+                reward_schedule
+                and isinstance(reward_schedule, dict)
+                and reward_schedule.get("type") == "wta_amount"
+            ):
+                # Winner Takes All Logic
+                if winners:  # Ensure there is at least one winner
+                    winner_data = winners[0]  # Get the top winner
+                    logger.debug(
+                        f"[distribute_rewards] WTA: Processing top winner, data={winner_data}"
                     )
-                    continue
+                    user_id = winner_data["user_id"]
+                    user = session.query(User).filter(User.id == user_id).first()
 
-                reward_amount_yoctonear = 0
-                reward_amount_near_str = "0"
-
-                if reward_schedule and isinstance(reward_schedule, dict):
-                    schedule_type = reward_schedule.get("type")
-                    if schedule_type == "wta_amount":  # Winner Takes All
+                    if not user or not user.wallet_address:
+                        logger.warning(
+                            f"[distribute_rewards] WTA: Top winner User {user_id} (Username: {winner_data.get('username', 'N/A')}) has no wallet linked or user not found. No reward distributed for WTA."
+                        )
+                    else:
+                        reward_amount_yoctonear = 0
+                        reward_amount_near_str = "0"
                         amount_text = str(reward_schedule.get("details_text", ""))
-                        # Expecting format like "1 NEAR" or "0.5 NEAR"
                         match = re.search(r"(\d+(?:\.\d+)?)", amount_text)
                         if match:
                             reward_amount_near_str = match.group(1)
                             try:
                                 reward_amount_yoctonear = int(
                                     float(reward_amount_near_str) * NEAR
-                                )  # NEAR is 10^24 yoctoNEAR
+                                )
                             except ValueError:
                                 logger.error(
-                                    f"[distribute_rewards] Invalid reward amount in details_text: {amount_text} for quiz {quiz_id}"
+                                    f"[distribute_rewards] WTA: Invalid reward amount in details_text: {amount_text} for quiz {quiz_id}"
+                                )
+                        else:
+                            logger.error(
+                                f"[distribute_rewards] WTA: Could not parse reward amount from details_text: {amount_text} for quiz {quiz_id}"
+                            )
+
+                        if reward_amount_yoctonear > 0:
+                            # Deduct 2% fee from the reward
+                            reward_amount_near_float = (
+                                float(reward_amount_near_str) * 0.98
+                            )
+                            reward_amount_near_str_final = str(
+                                round(reward_amount_near_float, 6)
+                            )
+                            reward_amount_yoctonear_final = int(
+                                reward_amount_near_float * NEAR
+                            )
+
+                            if reward_amount_yoctonear_final > 0:
+                                recipient_wallet = user.wallet_address
+                                logger.info(
+                                    f"[distribute_rewards] WTA: Attempting to send {reward_amount_near_str_final} NEAR ({reward_amount_yoctonear_final} yoctoNEAR) to {recipient_wallet} (User: {winner_data.get('username', 'N/A')})"
+                                )
+                                try:
+                                    tx_result = await self.near_account.send_money(
+                                        recipient_wallet, reward_amount_yoctonear_final
+                                    )
+                                    tx_hash_str = str(
+                                        tx_result.get("transaction_outcome", {}).get(
+                                            "id", "N/A"
+                                        )
+                                        if isinstance(tx_result, dict)
+                                        else tx_result
+                                    )
+                                    logger.info(
+                                        f"[distribute_rewards] WTA: Successfully sent {reward_amount_near_str_final} NEAR to {recipient_wallet}. Tx details: {tx_hash_str}"
+                                    )
+                                    successful_transfers.append(
+                                        {
+                                            "user_id": user_id,
+                                            "username": winner_data.get(
+                                                "username", "N/A"
+                                            ),
+                                            "wallet_address": recipient_wallet,
+                                            "amount_near": reward_amount_near_str_final,
+                                            "tx_hash": tx_hash_str,
+                                        }
+                                    )
+                                except Exception as e:
+                                    logger.error(
+                                        f"[distribute_rewards] WTA: Failed to send reward to {recipient_wallet}: {e}"
+                                    )
+                                    traceback.print_exc()
+                            else:
+                                logger.warning(
+                                    f"[distribute_rewards] WTA: Calculated reward amount for user {user_id} is zero or negative after fee ({reward_amount_near_str_final} NEAR), skipping transfer."
+                                )
+                        else:
+                            logger.warning(
+                                f"[distribute_rewards] WTA: Parsed reward amount for user {user_id} is zero or negative ({reward_amount_near_str} NEAR), skipping transfer."
+                            )
+                else:
+                    logger.info(
+                        f"[distribute_rewards] WTA: No winners found for quiz {quiz_id}. No rewards distributed."
+                    )
+            else:
+                # Existing rank-based or other reward logic
+                for rank, winner_data in enumerate(winners, 1):
+                    logger.debug(
+                        f"[distribute_rewards] Processing rank={rank}, data={winner_data}"
+                    )
+                    user_id = winner_data["user_id"]
+                    user = session.query(User).filter(User.id == user_id).first()
+
+                    # Skip if no wallet linked
+                    if not user or not user.wallet_address:
+                        logger.warning(
+                            f"[distribute_rewards] User {user_id} (Username: {winner_data.get('username', 'N/A')}) has no wallet linked or user not found, skipping."
+                        )
+                        continue
+
+                    reward_amount_yoctonear = 0
+                    reward_amount_near_str = "0"
+
+                    if reward_schedule and isinstance(reward_schedule, dict):
+                        schedule_type = reward_schedule.get("type")
+                        if schedule_type == "wta_amount":  # Winner Takes All
+                            amount_text = str(reward_schedule.get("details_text", ""))
+                            # Expecting format like "1 NEAR" or "0.5 NEAR"
+                            match = re.search(r"(\d+(?:\.\d+)?)", amount_text)
+                            if match:
+                                reward_amount_near_str = match.group(1)
+                                try:
+                                    reward_amount_yoctonear = int(
+                                        float(reward_amount_near_str) * NEAR
+                                    )  # NEAR is 10^24 yoctoNEAR
+                                except ValueError:
+                                    logger.error(
+                                        f"[distribute_rewards] Invalid reward amount in details_text: {amount_text} for quiz {quiz_id}"
+                                    )
+                                    continue
+                            else:
+                                logger.error(
+                                    f"[distribute_rewards] Could not parse reward amount from details_text: {amount_text} for quiz {quiz_id}"
+                                )
+                                continue
+                        # Example for rank-based rewards (if you add this type later)
+                        elif schedule_type == "rank_based" and str(
+                            rank
+                        ) in reward_schedule.get("ranks", {}):
+                            reward_amount_near_str = str(
+                                reward_schedule["ranks"][str(rank)]
+                            )
+                            try:
+                                reward_amount_yoctonear = int(
+                                    float(reward_amount_near_str) * NEAR
+                                )
+                            except ValueError:
+                                logger.error(
+                                    f"[distribute_rewards] Invalid reward amount for rank {rank}: {reward_amount_near_str} for quiz {quiz_id}"
                                 )
                                 continue
                         else:
-                            logger.error(
-                                f"[distribute_rewards] Could not parse reward amount from details_text: {amount_text} for quiz {quiz_id}"
-                            )
-                            continue
-                    # Example for rank-based rewards (if you add this type later)
-                    elif schedule_type == "rank_based" and str(
-                        rank
-                    ) in reward_schedule.get("ranks", {}):
-                        reward_amount_near_str = str(
-                            reward_schedule["ranks"][str(rank)]
-                        )
-                        try:
-                            reward_amount_yoctonear = int(
-                                float(reward_amount_near_str) * NEAR
-                            )
-                        except ValueError:
-                            logger.error(
-                                f"[distribute_rewards] Invalid reward amount for rank {rank}: {reward_amount_near_str} for quiz {quiz_id}"
+                            logger.warning(
+                                f"[distribute_rewards] Unknown or unhandled reward schedule type '{schedule_type}' or missing rank info for quiz {quiz_id}. Schedule: {reward_schedule}"
                             )
                             continue
                     else:
-                        logger.warning(
-                            f"[distribute_rewards] Unknown or unhandled reward schedule type '{schedule_type}' or missing rank info for quiz {quiz_id}. Schedule: {reward_schedule}"
+                        logger.error(
+                            f"[distribute_rewards] Invalid or missing reward_schedule for quiz {quiz_id}"
                         )
                         continue
-                else:
-                    logger.error(
-                        f"[distribute_rewards] Invalid or missing reward_schedule for quiz {quiz_id}"
-                    )
-                    continue
 
-                if reward_amount_yoctonear <= 0:
-                    logger.warning(
-                        f"[distribute_rewards] Calculated reward amount for user {user_id} is zero or negative ({reward_amount_near_str} NEAR), skipping transfer."
-                    )
-                    continue
+                    if reward_amount_yoctonear <= 0:
+                        logger.warning(
+                            f"[distribute_rewards] Calculated reward amount for user {user_id} is zero or negative ({reward_amount_near_str} NEAR), skipping transfer."
+                        )
+                        continue
 
-                # Deduct 2% fee from the reward
-                reward_amount_near_str = str(
-                    round(float(reward_amount_near_str) * 0.98, 6)
-                )
-                reward_amount_yoctonear = int(float(reward_amount_near_str) * NEAR)
+                    # Deduct 2% fee from the reward
+                    # Ensure reward_amount_near_str is a string representation of a float
+                    try:
+                        reward_amount_near_float = float(reward_amount_near_str) * 0.98
+                        reward_amount_near_str_final = str(
+                            round(reward_amount_near_float, 6)
+                        )
+                        reward_amount_yoctonear_final = int(
+                            reward_amount_near_float * NEAR
+                        )
+                    except ValueError:
+                        logger.error(
+                            f"[distribute_rewards] Could not convert reward_amount_near_str '{reward_amount_near_str}' to float for fee calculation."
+                        )
+                        continue
 
-                recipient_wallet = user.wallet_address
-                logger.info(
-                    f"[distribute_rewards] Attempting to send {reward_amount_near_str} NEAR ({reward_amount_yoctonear} yoctoNEAR) to {recipient_wallet} (User: {winner_data.get('username', 'N/A')}, Rank: {rank})"
-                )
+                    if reward_amount_yoctonear_final <= 0:
+                        logger.warning(
+                            f"[distribute_rewards] Calculated reward amount for user {user_id} is zero or negative after fee ({reward_amount_near_str_final} NEAR), skipping transfer."
+                        )
+                        continue
 
-                try:
-                    # THE ACTUAL TRANSFER CALL
-                    tx_result = await self.near_account.send_money(
-                        recipient_wallet, reward_amount_yoctonear
-                    )
-                    # py-near send_money usually returns a dict with transaction outcome or raises error.
-                    # Let's assume tx_result contains a hash or success indicator.
-                    # For robust check, one might inspect tx_result structure based on py-near documentation.
-                    # Simplified: if it doesn't raise, assume success for now and log what we get.
-                    tx_hash_str = str(
-                        tx_result.get("transaction_outcome", {}).get("id", "N/A")
-                        if isinstance(tx_result, dict)
-                        else tx_result
-                    )
-
+                    recipient_wallet = user.wallet_address
                     logger.info(
-                        f"[distribute_rewards] Successfully sent {reward_amount_near_str} NEAR to {recipient_wallet}. Tx details: {tx_hash_str}"
+                        f"[distribute_rewards] Attempting to send {reward_amount_near_str_final} NEAR ({reward_amount_yoctonear_final} yoctoNEAR) to {recipient_wallet} (User: {winner_data.get('username', 'N/A')}, Rank: {rank})"
                     )
-                    successful_transfers.append(
-                        {
-                            "user_id": user_id,
-                            "username": winner_data.get(
-                                "username", "N/A"
-                            ),  # Changed from user.username
-                            "wallet_address": recipient_wallet,
-                            "amount_near_str": reward_amount_near_str,
-                            "tx_hash": tx_hash_str,
-                        }
-                    )
-                except Exception as transfer_exc:
-                    logger.error(
-                        f"[distribute_rewards] Failed to send NEAR to {recipient_wallet} for user {user_id}: {transfer_exc}"
-                    )
-                    traceback.print_exc()
+
+                    try:
+                        # THE ACTUAL TRANSFER CALL
+                        tx_result = await self.near_account.send_money(
+                            recipient_wallet, reward_amount_yoctonear_final
+                        )
+                        # py-near send_money usually returns a dict with transaction outcome or raises error.
+                        # Let's assume tx_result contains a hash or success indicator.
+                        # For robust check, one might inspect tx_result structure based on py-near documentation.
+                        # Simplified: if it doesn't raise, assume success for now and log what we get.
+                        tx_hash_str = str(
+                            tx_result.get("transaction_outcome", {}).get("id", "N/A")
+                            if isinstance(tx_result, dict)
+                            else tx_result
+                        )
+
+                        logger.info(
+                            f"[distribute_rewards] Successfully sent {reward_amount_near_str_final} NEAR to {recipient_wallet}. Tx details: {tx_hash_str}"
+                        )
+                        successful_transfers.append(
+                            {
+                                "user_id": user_id,
+                                "username": winner_data.get(
+                                    "username", "N/A"
+                                ),  # Added username
+                                "wallet_address": recipient_wallet,
+                                "amount_near": reward_amount_near_str_final,  # Use final amount
+                                "tx_hash": tx_hash_str,
+                                "rank": rank,  # Keep rank for non-WTA
+                            }
+                        )
+                    except Exception as transfer_exc:
+                        logger.error(
+                            f"[distribute_rewards] Failed to send NEAR to {recipient_wallet} for user {user_id}: {transfer_exc}"
+                        )
+                        traceback.print_exc()
 
             logger.info(
                 f"[distribute_rewards] Total successful transfers: {len(successful_transfers)}"

@@ -30,7 +30,9 @@ async def link_wallet(update: Update, context: CallbackContext):
     )
     # Set user state to wait for wallet address
     redis_client = RedisClient()
-    await redis_client.set_user_data_key(str(update.effective_user.id), "awaiting", "wallet_address")
+    await redis_client.set_user_data_key(
+        str(update.effective_user.id), "awaiting", "wallet_address"
+    )
     await redis_client.close()
 
 
@@ -110,7 +112,7 @@ async def get_user_profile(user_id: str) -> Optional[dict]:
     """Retrieve user profile, from cache if available, otherwise from DB."""
     redis_client = RedisClient()
     cache_key = f"user_profile:{user_id}"
-    
+
     cached_user = await redis_client.get_cached_object(cache_key)
     if cached_user:
         logger.info(f"User profile for {user_id} found in cache.")
@@ -182,7 +184,7 @@ async def remove_user_wallet(user_id: str) -> bool:
             # If user doesn't exist or no wallet is linked, consider it a success (idempotency)
             await redis_client.close()
             return True
-        await redis_client.close() # Should not be reached if logic is correct
+        await redis_client.close()  # Should not be reached if logic is correct
         return False
     except Exception as e:
         logger.error(f"Error removing user wallet for {user_id}: {e}", exc_info=True)
@@ -191,6 +193,7 @@ async def remove_user_wallet(user_id: str) -> bool:
         return False
     finally:
         session.close()
+
 
 async def close_redis_client_after_request(redis_client: RedisClient):
     if redis_client:

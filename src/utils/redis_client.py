@@ -1,4 +1,3 @@
-\
 import redis
 import json
 import logging
@@ -6,6 +5,7 @@ from typing import Optional, Any, Dict
 from utils.config import Config
 
 logger = logging.getLogger(__name__)
+
 
 class RedisClient:
     _instance: Optional[redis.Redis] = None
@@ -19,10 +19,12 @@ class RedisClient:
                     port=Config.REDIS_PORT,
                     db=Config.REDIS_DB,
                     password=Config.REDIS_PASSWORD,
-                    decode_responses=False # Store bytes, handle decode/encode in methods
+                    decode_responses=False,  # Store bytes, handle decode/encode in methods
                 )
                 cls._instance.ping()
-                logger.info(f"Successfully connected to Redis at {Config.REDIS_HOST}:{Config.REDIS_PORT}")
+                logger.info(
+                    f"Successfully connected to Redis at {Config.REDIS_HOST}:{Config.REDIS_PORT}"
+                )
             except redis.exceptions.ConnectionError as e:
                 logger.error(f"Could not connect to Redis: {e}")
                 # In a real application, you might want to handle this more gracefully,
@@ -76,7 +78,7 @@ class RedisClient:
 
     # User data specific methods
     USER_DATA_PREFIX = "user_data:"
-    USER_DATA_TTL = 3600 * 24 # 24 hours
+    USER_DATA_TTL = 3600 * 24  # 24 hours
 
     @classmethod
     def get_user_data(cls, user_id: str) -> Dict[str, Any]:
@@ -99,7 +101,9 @@ class RedisClient:
         return cls.set_value(key, current_data, ttl_seconds=cls.USER_DATA_TTL)
 
     @classmethod
-    def get_user_data_key(cls, user_id: str, data_key: str, default: Optional[Any] = None) -> Optional[Any]:
+    def get_user_data_key(
+        cls, user_id: str, data_key: str, default: Optional[Any] = None
+    ) -> Optional[Any]:
         current_data = cls.get_user_data(user_id)
         return current_data.get(data_key, default)
 
@@ -110,7 +114,7 @@ class RedisClient:
         if data_key in current_data:
             del current_data[data_key]
             return cls.set_value(key, current_data, ttl_seconds=cls.USER_DATA_TTL)
-        return False # Key not found
+        return False  # Key not found
 
     @classmethod
     def clear_user_data(cls, user_id: str) -> bool:
@@ -160,7 +164,8 @@ class RedisClient:
             logger.error(f"Error deleting cached object with key {cache_key}: {e}")
             return False
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     # Basic test
     logging.basicConfig(level=logging.DEBUG)
     test_user_id = "12345_test"
@@ -182,7 +187,9 @@ if __name__ == '__main__':
     RedisClient.delete_user_data_key(test_user_id, "state")
     print(f"After deleting state: {RedisClient.get_user_data(test_user_id)}")
 
-    non_existent = RedisClient.get_user_data_key(test_user_id, "non_existent_key", "default_val")
+    non_existent = RedisClient.get_user_data_key(
+        test_user_id, "non_existent_key", "default_val"
+    )
     print(f"Non-existent key with default: {non_existent}")
 
     RedisClient.update_user_data(test_user_id, {"age": 30, "city": "Testville"})

@@ -19,7 +19,9 @@ class Quiz(Base):
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     topic = Column(String, nullable=False)
     questions = Column(JSON, default=[])
-    status = Column(Enum(QuizStatus), default=QuizStatus.DRAFT, index=True)  # Added index
+    status = Column(
+        Enum(QuizStatus), default=QuizStatus.DRAFT, index=True
+    )  # Added index
     # Reward details and on-chain address
     reward_schedule = Column(JSON, default={})
     deposit_address = Column(String, nullable=True)
@@ -49,7 +51,9 @@ class QuizAnswer(Base):
     user_id = Column(String, nullable=False, index=True)  # Added index
     username = Column(String, nullable=True)  # For displaying winners
     answer = Column(String, nullable=False)  # User's selected answer (e.g., "A", "B")
-    is_correct = Column(String, nullable=False, default=False, index=True)  # Added index
+    is_correct = Column(
+        String, nullable=False, default=False, index=True
+    )  # Added index
     answered_at = Column(DateTime, default=datetime.datetime.utcnow)
 
     # Quick helper to compute rank based on correct answers and speed
