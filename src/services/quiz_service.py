@@ -707,11 +707,13 @@ async def send_quiz_question(bot, user_id, quiz, question_index):
     message_text_parts = []
     question_number = question_index + 1
     total_questions = len(questions_list)
-    message_text_parts.append(f"Quiz: {quiz.topic} (Question {question_number}/{total_questions})")
+    message_text_parts.append(
+        f"Quiz: {quiz.topic} (Question {question_number}/{total_questions})"
+    )
     message_text_parts.append(f"\n{question_text}\n")
 
     keyboard = []
-    option_labels = sorted(options.keys()) # Ensure consistent order, e.g., A, B, C, D
+    option_labels = sorted(options.keys())  # Ensure consistent order, e.g., A, B, C, D
 
     for key in option_labels:
         value = options[key]
@@ -725,7 +727,7 @@ async def send_quiz_question(bot, user_id, quiz, question_index):
                 )
             ]
         )
-    
+
     full_message_text = "\n".join(message_text_parts)
     reply_markup = InlineKeyboardMarkup(keyboard)
 
