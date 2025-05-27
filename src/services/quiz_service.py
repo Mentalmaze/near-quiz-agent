@@ -249,32 +249,20 @@ async def process_questions(
         )
         return
 
-    # Calculate end time if duration_seconds was specified
-    end_time = None
-    if duration_seconds and duration_seconds > 0:
-        end_time = datetime.utcnow() + timedelta(seconds=duration_seconds)
-        logger.info(
-            f"Quiz end time calculated: {end_time} based on {duration_seconds} seconds."
-        )
-    else:
-        logger.info(
-            "No duration specified or duration is zero, quiz will not have an end time."
-        )
-
     # Persist quiz with multiple questions
     session = SessionLocal()
     try:
         quiz = Quiz(
             topic=topic,
             questions=questions_list,
-            status=QuizStatus.ACTIVE,
+            status=QuizStatus.DRAFT, # Initial status is DRAFT
             group_chat_id=group_chat_id,
-            end_time=end_time,  # Set the end time if specified
+            duration_seconds=duration_seconds # Store the duration
         )
         session.add(quiz)
         session.commit()
         quiz_id = quiz.id
-        logger.info(f"Created quiz with ID: {quiz_id}")
+        logger.info(f"Created quiz with ID: {quiz_id} in DRAFT status with duration {duration_seconds} seconds.")
     finally:
         session.close()
 
@@ -338,21 +326,19 @@ async def process_questions(
         f"Sent reward setup prompt for quiz ID: {quiz_id} to user {update.effective_user.id}"
     )
 
-    # If quiz has an end time, schedule auto distribution task
-    if end_time:
-        # Convert to seconds from now
-        seconds_until_end = (end_time - datetime.utcnow()).total_seconds()
-        if seconds_until_end > 0:
-            # Schedule auto distribution task
-            context.application.create_task(
-                schedule_auto_distribution(
-                    context.application, quiz_id, seconds_until_end
-                )
-            )
-            logger.info(
-                f"Scheduled auto distribution for quiz {quiz_id} in {seconds_until_end} seconds"
-            )
-
+    # If quiz has an end time, schedule auto distribution task - THIS LOGIC MOVES
+    # The scheduling of auto_distribution will now happen when the quiz becomes ACTIVE
+    # if end_time: 
+    #     seconds_until_end = (end_time - datetime.utcnow()).total_seconds()
+    #     if seconds_until_end > 0:
+    #         context.application.create_task(
+    #             schedule_auto_distribution(
+    #                 context.application, quiz_id, seconds_until_end
+    #             )
+    #         )
+    #         logger.info(
+    #             f"Scheduled auto distribution for quiz {quiz_id} in {seconds_until_end} seconds"
+    #         )
 
 async def save_quiz_reward_details(
     quiz_id: str, reward_type: str, reward_text: str
@@ -402,7 +388,15 @@ async def save_quiz_payment_hash(quiz_id: str, payment_hash: str) -> bool:
     """Saves the payment transaction hash for a quiz and updates its status."""
     session = SessionLocal()
     redis_client = RedisClient()
+    application = None # Will be populated if we need to schedule a task
     try:
+        # Attempt to get application context if available for scheduling
+        # This is a bit of a workaround as this function doesn't have direct access to context.application
+        # A more robust solution might involve passing the application object or a scheduler callback.
+        from telegram.ext import JobQueue
+        if JobQueue.get_instance(): # Check if a JobQueue (and thus Application) exists
+            application = JobQueue.get_instance().application
+
         quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
         if not quiz:
             logger.error(
@@ -411,14 +405,38 @@ async def save_quiz_payment_hash(quiz_id: str, payment_hash: str) -> bool:
             return False
 
         quiz.payment_transaction_hash = payment_hash
-        # Assuming that once payment hash is provided, the quiz is funded and ready.
-        # If there's a separate verification step for the hash, status might be FUNDING.
-        # For now, let's set it to ACTIVE if it was in DRAFT or FUNDING.
+        
         if quiz.status in [QuizStatus.DRAFT, QuizStatus.FUNDING]:
             quiz.status = QuizStatus.ACTIVE
+            quiz.activated_at = datetime.now(timezone.utc) # Set activation time
             logger.info(
-                f"Quiz {quiz_id} status updated to ACTIVE after payment hash received."
+                f"Quiz {quiz_id} status updated to ACTIVE after payment hash received. Activated at {quiz.activated_at}."
             )
+
+            # Calculate end_time based on activated_at and duration_seconds
+            if quiz.duration_seconds and quiz.duration_seconds > 0:
+                quiz.end_time = quiz.activated_at + timedelta(seconds=quiz.duration_seconds)
+                logger.info(
+                    f"Quiz {quiz_id} end time calculated: {quiz.end_time} based on activation and duration {quiz.duration_seconds}s."
+                )
+                
+                # Schedule auto distribution if application context is available
+                if application and quiz.end_time:
+                    seconds_until_end = (quiz.end_time - datetime.now(timezone.utc)).total_seconds()
+                    if seconds_until_end > 0:
+                        application.create_task(
+                            schedule_auto_distribution(
+                                application, quiz_id, seconds_until_end
+                            )
+                        )
+                        logger.info(
+                            f"Scheduled auto distribution for quiz {quiz_id} in {seconds_until_end} seconds upon activation."
+                        )
+                    else:
+                        logger.warning(f"Quiz {quiz_id} activated but already past its intended end time. Auto-distribution may not run as expected.")
+            else:
+                logger.info(f"Quiz {quiz_id} activated without a specific duration.")
+
         else:
             logger.info(
                 f"Quiz {quiz_id} already in status {quiz.status}, not changing status but saving hash."
@@ -1453,7 +1471,7 @@ async def schedule_auto_distribution(
                     )
         else:
             logger.error(
-                "[schedule_auto_distribution] Blockchain monitor not found in application context. Cannot distribute rewards for quiz {quiz_id}."
+                "[schedule_auto_distribution] Blockchain monitor not found in application context. Cannot distribute rewards for quiz {id}."
             )
             if quiz.group_chat_id:
                 await application.bot.send_message(

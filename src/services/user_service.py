@@ -85,27 +85,27 @@ async def handle_wallet_address(update: Update, context: CallbackContext):
             await safe_send_message(
                 context.bot,
                 update.effective_chat.id,
-                "⚠️ Wallet address cannot be empty. Please send a valid NEAR wallet address (e.g., 'yourname.near').",
+                "⚠️ Wallet address cannot be empty. Please send a valid NEAR wallet address (e.g., 'yourname.near' or 'yourname.testnet').",
             )
             return
 
         is_near = wallet_address.endswith(".near")
         is_testnet = wallet_address.endswith(".testnet")
-        validation_fails = not is_near or is_testnet  # True if validation should fail
+        # Allow both .near and .testnet addresses
+        validation_fails = not (is_near or is_testnet)
 
         logger.info(
             f"For wallet '{wallet_address}': ends_with_near={is_near}, ends_with_testnet={is_testnet}, validation_fails_if_true={validation_fails}"
         )
 
-        # Only allow mainnet .near addresses
         if validation_fails:
             logger.warning(
-                f"Wallet address validation failed for '{wallet_address}'. Criteria: (not ends_with_near) OR (ends_with_testnet)."
+                f"Wallet address validation failed for '{wallet_address}'. Criteria: not (ends_with_near OR ends_with_testnet)."
             )
             await safe_send_message(
                 context.bot,
                 update.effective_chat.id,
-                "❌ Only mainnet NEAR wallets are allowed. Please provide a wallet address ending with '.near' (not '.testnet').",
+                "❌ Invalid wallet address. Please provide a wallet address ending with '.near' or '.testnet'.",
             )
             return
 

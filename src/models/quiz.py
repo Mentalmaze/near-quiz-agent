@@ -40,6 +40,8 @@ class Quiz(Base):
     # Track if winners have been announced
     winners_announced = Column(String, default=False)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    activated_at = Column(DateTime, nullable=True)  # Timestamp for when quiz becomes active
+    duration_seconds = Column(BigInteger, nullable=True) # Store the intended duration
 
 
 class QuizAnswer(Base):
