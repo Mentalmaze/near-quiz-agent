@@ -22,7 +22,9 @@ from services.user_service import (
     get_user_wallet,
     set_user_wallet,
     remove_user_wallet,
-)  # Updated imports
+    link_wallet as service_link_wallet,  # Renamed import
+    handle_wallet_address as service_handle_wallet_address,  # Renamed import
+)
 from agent import generate_quiz
 import logging
 import re  # Import re for duration_input and potentially wallet validation
@@ -619,51 +621,9 @@ async def create_quiz_handler(update: Update, context: CallbackContext):
 
 
 async def link_wallet_handler(update: Update, context: CallbackContext):
-    """Handler for /linkwallet command."""
-    user = update.effective_user
-    if not user:
-        await update.message.reply_text("Could not identify user.")
-        return
-
-    user_id = user.id
-
-    # Check if wallet is already linked
-    # This assumes get_user_wallet returns the wallet address if linked, or None otherwise
-    existing_wallet = await get_user_wallet(user_id)
-    if existing_wallet:
-        await update.message.reply_text(
-            f"You have already linked the wallet: `{existing_wallet}`.\n"
-            "If you want to link a new wallet, please use /unlinkwallet first."
-        )
-        return
-
-    if not context.args:
-        await update.message.reply_text(
-            "Please provide your wallet address after the command.\n"
-            "Example: `/linkwallet yourwallet.near`"
-        )
-        return
-
-    wallet_address = context.args[0].strip()
-
-    # Only allow mainnet .near addresses
-    if not (
-        wallet_address.endswith(".near") and not wallet_address.endswith(".testnet")
-    ):
-        await update.message.reply_text(
-            "❌ Only mainnet NEAR wallets are allowed. Please provide a wallet address ending with '.near' (not '.testnet')."
-        )
-        return
-
-    # This assumes set_user_wallet returns True on success, False on failure
-    if await set_user_wallet(user_id, wallet_address):
-        await update.message.reply_text(
-            f"✅ Wallet `{wallet_address}` linked successfully!"
-        )
-    else:
-        await update.message.reply_text(
-            "⚠️ Failed to link your wallet. Please try again or contact support."
-        )
+    """Handler for /linkwallet command - uses service to prompt for wallet."""
+    # This now calls the function from user_service.py
+    await service_link_wallet(update, context)
 
 
 async def unlink_wallet_handler(update: Update, context: CallbackContext):
@@ -739,16 +699,26 @@ async def quiz_answer_handler(update: Update, context: CallbackContext):
 
 async def private_message_handler(update: Update, context: CallbackContext):
     """Route private text messages to the appropriate handler."""
-    user_id = update.effective_user.id
+    user_id = str(update.effective_user.id)  # Ensure user_id is string
     message_text = update.message.text
-    redis_client = RedisClient()  # Instantiate RedisClient
+    redis_client = RedisClient()
 
     logger.info(
         f"PRIVATE_MESSAGE_HANDLER received: '{message_text}' from user {user_id}"
     )
-    # logger.info(
-    #     f"User_data for {user_id} in private_message_handler: {context.user_data}" # Cannot log context.user_data
-    # )
+
+    # Check if awaiting wallet address
+    is_awaiting_wallet = await redis_client.get_user_data_key(user_id, "awaiting")
+    logger.info(f"User {user_id} 'awaiting' state from Redis: {is_awaiting_wallet}") # Added logging
+    if is_awaiting_wallet == "wallet_address":
+        logger.info(
+            f"User {user_id} is awaiting wallet_address. Calling service_handle_wallet_address."
+        )
+        # Clear the state immediately before calling the handler to avoid re-entry on error/retry within handler
+        # The handler itself will clear it again on success, which is fine.
+        # await redis_client.delete_user_data_key(user_id, "awaiting") # Let service_handle_wallet_address manage this state
+        await service_handle_wallet_address(update, context)
+        return
 
     # Check if awaiting payment hash
     quiz_id_awaiting_hash = await redis_client.get_user_data_key(
@@ -1008,41 +978,28 @@ async def private_message_handler(update: Update, context: CallbackContext):
         if m:
             val = int(m.group(1))
             unit = m.group(2)
-            secs = val * (3600 if unit.startswith("hour") else 60)
+            if unit in ("minute", "min"):
+                secs = val * 60
+            elif unit == "hour": # Corrected syntax error here: changed ) to :
+                secs = val * 3600
             await redis_client.set_user_data_key(user_id, "duration_seconds", secs)
             logger.info(
-                f"Successfully parsed duration for user {user_id}: {secs} seconds from '{message_text}'"
+                f"Successfully parsed duration '{message_text}' to {secs} seconds for user {user_id}. Proceeding to confirm_prompt."
             )
+            # Since this is a direct message, update.message should be valid
+            await confirm_prompt(update, context) # Call confirm_prompt directly
+            return # Return after handling duration input
         else:
-            # Try a more flexible regex
-            m = re.search(r"(\d+)", txt)
-            if m and ("minute" in txt.lower() or "min" in txt.lower()):
-                val = int(m.group(1))
-                secs = val * 60
-                await redis_client.set_user_data_key(user_id, "duration_seconds", secs)
-                logger.info(
-                    f"Flexibly parsed duration: {secs} seconds from '{message_text}'"
-                )
-            elif m and "hour" in txt.lower():
-                val = int(m.group(1))
-                secs = val * 3600
-                await redis_client.set_user_data_key(user_id, "duration_seconds", secs)
-                logger.info(
-                    f"Flexibly parsed duration: {secs} seconds from '{message_text}'"
-                )
-            else:
-                await redis_client.set_user_data_key(
-                    user_id, "duration_seconds", 300
-                )  # Default to 5 minutes
-                logger.info(
-                    f"Could not parse duration from '{message_text}'. Using default: 300 seconds"
-                )
-                await update.message.reply_text(
-                    "I couldn't understand that format. Using 5 minutes by default."
-                )
-        return await confirm_prompt(
-            update, context
-        )  # confirm_prompt needs redis_client
+            # Handle cases where regex doesn't match, e.g., "30" or "1 day"
+            # For now, assume it's not a valid duration if it doesn't match common patterns
+            logger.warning(
+                f"Could not parse duration input '{message_text}' from user {user_id} using primary regex. Replying with error."
+            )
+            await update.message.reply_text(
+                "Hmm, I didn't quite catch that duration. Please use a format like '10 minutes' or '2 hours'."
+            )
+            # Do not clear awaiting_duration_input here, let user try again or use buttons
+            return # Return to stop further processing if duration was expected but not parsed
 
     logger.info(
         f"Message from user {user_id} ('{message_text}') is NOT for reward structure or duration input. Checking ConversationHandler."
