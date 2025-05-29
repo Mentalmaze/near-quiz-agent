@@ -561,28 +561,15 @@ class BlockchainMonitor:
                 session.close()
 
     @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=4, max=10),
-        retry=retry_if_exception_type((httpx.TimeoutException, httpx.ReadTimeout)),
-    )
-    async def _make_rpc_request(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Make an RPC request with retries and proper error handling"""
-        timeout = httpx.Timeout(30.0, connect=10.0)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(Config.NEAR_RPC_ENDPOINT_TRANS, json=payload)
-            resp.raise_for_status()
-            return resp.json()
-
-    @retry(
         retry=retry_if_exception_type((httpx.ReadTimeout, httpx.ConnectTimeout)),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=4, max=10),
     )
-    async def verify_transaction_by_hash(
+    async def _fetch_transaction_status_rpc(
         self, tx_hash: str, sender_account_id: str
     ) -> Dict[str, Any]:
         """
-        Verify a transaction by its hash using NEAR RPC.
+        Fetches raw transaction status from NEAR RPC.
         Implements retry logic for timeout errors.
 
         Args:
@@ -629,11 +616,10 @@ class BlockchainMonitor:
                 logger.error(f"Error verifying transaction {tx_hash}: {str(e)}")
                 raise
 
-    async def verify_transaction_by_hash(self, tx_hash: str, quiz_id: str) -> bool:
-        """
-        Verify a transaction by its hash to confirm a deposit was made.
-        Uses direct JSON-RPC `tx` endpoint to fetch the transaction.
-        """
+    async def verify_transaction_by_hash(
+        self, tx_hash: str, quiz_id: str, expected_sender: Optional[str] = None
+    ) -> bool:
+        """Verify a transaction by its hash, optionally checking the sender."""
         if not self.near_account:
             logger.error("Cannot verify transaction - NEAR account not initialized")
             return False
