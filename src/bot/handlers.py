@@ -729,7 +729,10 @@ async def private_message_handler(update: Update, context: CallbackContext):
             f"Handling payment hash input '{payment_hash}' for quiz {quiz_id_awaiting_hash} from user {user_id}"
         )
 
-        save_success = await save_quiz_payment_hash(quiz_id_awaiting_hash, payment_hash)
+        # Pass context.application to save_quiz_payment_hash
+        save_success = await save_quiz_payment_hash(
+            quiz_id_awaiting_hash, payment_hash, context.application
+        )
 
         if save_success:
             await update.message.reply_text(
@@ -860,12 +863,14 @@ async def private_message_handler(update: Update, context: CallbackContext):
                     friendly_method_name = "manually entered reward text"
 
                 reward_confirmation_content = (
-                    f"✅ Got it! I\\'ve noted down {friendly_method_name} as: \'{_escape_markdown_v2_specials(message_text)}\' for Quiz ID {quiz_id_for_setup}.\\n"
+                    f"✅ Got it! I\\'ve noted down {friendly_method_name} as: '{_escape_markdown_v2_specials(message_text)}' for Quiz ID {quiz_id_for_setup}.\\n"
                     f"The rewards for this quiz are now set up."
                 )
-                logger.info(f"Reward confirmation content prepared: {reward_confirmation_content}")
+                logger.info(
+                    f"Reward confirmation content prepared: {reward_confirmation_content}"
+                )
 
-                fee = round(total_amount * 0.02, 6) # Calculate 2% fee
+                fee = round(total_amount * 0.02, 6)  # Calculate 2% fee
                 total_with_fee = round(total_amount + fee, 6)
                 deposit_instructions = (
                     f"💰 Please deposit *{total_with_fee} {currency}* (includes 2% fee: {fee} {currency}) "
@@ -903,17 +908,17 @@ async def private_message_handler(update: Update, context: CallbackContext):
                         f"All reward setup messages sent successfully for {awaiting_reward_type} to user {user_id}."
                     )
 
-                    await RedisClient.set_user_data_key( # Use static method
+                    await RedisClient.set_user_data_key(  # Use static method
                         user_id, "awaiting_payment_hash_for_quiz_id", quiz_id_for_setup
                     )
-                    await RedisClient.delete_user_data_key( # Use static method
+                    await RedisClient.delete_user_data_key(  # Use static method
                         user_id, "awaiting_reward_input_type"
                     )
-                    await RedisClient.delete_user_data_key( # Use static method
+                    await RedisClient.delete_user_data_key(  # Use static method
                         user_id, "current_quiz_id_for_reward_setup"
                     )
                     logger.info(
-                        f"Set \'awaiting_payment_hash_for_quiz_id\' to {quiz_id_for_setup} for user {user_id}."
+                        f"Set 'awaiting_payment_hash_for_quiz_id' to {quiz_id_for_setup} for user {user_id}."
                     )
                 except asyncio.TimeoutError:
                     logger.error(
@@ -933,21 +938,21 @@ async def private_message_handler(update: Update, context: CallbackContext):
                         "⚠️ An error occurred while sending the next steps. "
                         f"Please check the logs or contact support. You might need to restart reward setup for Quiz ID {quiz_id_for_setup}."
                     )
-            else: # save_reward_success was False
+            else:  # save_reward_success was False
                 await update.message.reply_text(
                     "⚠️ There was an issue saving your reward details. Please try sending them again."
                 )
-        else: # Parsing failed (total_amount is None or currency is None)
+        else:  # Parsing failed (total_amount is None or currency is None)
             # Save the raw input anyway, in case it's useful or for manual review
             await save_quiz_reward_details(
                 quiz_id_for_setup, awaiting_reward_type, message_text
             )
             await update.message.reply_text(
-                f"⚠️ I couldn\\'t automatically determine the total amount and currency from your input: \'{_escape_markdown_v2_specials(message_text)}\'.\\n"
-                f"Please enter the prize amount including the currency (e.g., \'5 NEAR\', \'0.1 USDT\')."
+                f"⚠️ I couldn\\'t automatically determine the total amount and currency from your input: '{_escape_markdown_v2_specials(message_text)}'.\\n"
+                f"Please enter the prize amount including the currency (e.g., '5 NEAR', '0.1 USDT')."
             )
             # Do not change Redis state, user needs to re-enter.
-        
+
         logger.info(
             f"Returning from private_message_handler after processing reward input for {awaiting_reward_type} for user {user_id}."
         )

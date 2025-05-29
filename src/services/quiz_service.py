@@ -14,7 +14,10 @@ from datetime import datetime, timedelta, timezone
 import traceback
 from utils.config import Config
 from utils.redis_client import RedisClient
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from telegram.ext import Application  # Forward reference for type hinting
 
 logger = logging.getLogger(__name__)
 
@@ -255,14 +258,16 @@ async def process_questions(
         quiz = Quiz(
             topic=topic,
             questions=questions_list,
-            status=QuizStatus.DRAFT, # Initial status is DRAFT
+            status=QuizStatus.DRAFT,  # Initial status is DRAFT
             group_chat_id=group_chat_id,
-            duration_seconds=duration_seconds # Store the duration
+            duration_seconds=duration_seconds,  # Store the duration
         )
         session.add(quiz)
         session.commit()
         quiz_id = quiz.id
-        logger.info(f"Created quiz with ID: {quiz_id} in DRAFT status with duration {duration_seconds} seconds.")
+        logger.info(
+            f"Created quiz with ID: {quiz_id} in DRAFT status with duration {duration_seconds} seconds."
+        )
     finally:
         session.close()
 
@@ -328,7 +333,7 @@ async def process_questions(
 
     # If quiz has an end time, schedule auto distribution task - THIS LOGIC MOVES
     # The scheduling of auto_distribution will now happen when the quiz becomes ACTIVE
-    # if end_time: 
+    # if end_time:
     #     seconds_until_end = (end_time - datetime.utcnow()).total_seconds()
     #     if seconds_until_end > 0:
     #         context.application.create_task(
@@ -339,6 +344,7 @@ async def process_questions(
     #         logger.info(
     #             f"Scheduled auto distribution for quiz {quiz_id} in {seconds_until_end} seconds"
     #         )
+
 
 async def save_quiz_reward_details(
     quiz_id: str, reward_type: str, reward_text: str
@@ -384,19 +390,11 @@ async def save_quiz_reward_details(
         session.close()
 
 
-async def save_quiz_payment_hash(quiz_id: str, payment_hash: str) -> bool:
+async def save_quiz_payment_hash(quiz_id: str, payment_hash: str, application: Optional["Application"]) -> bool:
     """Saves the payment transaction hash for a quiz and updates its status."""
     session = SessionLocal()
     redis_client = RedisClient()
-    application = None # Will be populated if we need to schedule a task
     try:
-        # Attempt to get application context if available for scheduling
-        # This is a bit of a workaround as this function doesn't have direct access to context.application
-        # A more robust solution might involve passing the application object or a scheduler callback.
-        from telegram.ext import JobQueue
-        if JobQueue.get_instance(): # Check if a JobQueue (and thus Application) exists
-            application = JobQueue.get_instance().application
-
         quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
         if not quiz:
             logger.error(
@@ -405,27 +403,36 @@ async def save_quiz_payment_hash(quiz_id: str, payment_hash: str) -> bool:
             return False
 
         quiz.payment_transaction_hash = payment_hash
-        
+
         if quiz.status in [QuizStatus.DRAFT, QuizStatus.FUNDING]:
             quiz.status = QuizStatus.ACTIVE
-            quiz.activated_at = datetime.now(timezone.utc) # Set activation time
+            quiz.activated_at = datetime.now(timezone.utc)  # Set activation time
             logger.info(
                 f"Quiz {quiz_id} status updated to ACTIVE after payment hash received. Activated at {quiz.activated_at}."
             )
 
             # Calculate end_time based on activated_at and duration_seconds
             if quiz.duration_seconds and quiz.duration_seconds > 0:
-                quiz.end_time = quiz.activated_at + timedelta(seconds=quiz.duration_seconds)
+                quiz.end_time = quiz.activated_at + timedelta(
+                    seconds=quiz.duration_seconds
+                )
                 logger.info(
                     f"Quiz {quiz_id} end time calculated: {quiz.end_time} based on activation and duration {quiz.duration_seconds}s."
                 )
-                
+
                 # Schedule auto distribution if application context is available
-                if application and quiz.end_time:
-                    seconds_until_end = (quiz.end_time - datetime.now(timezone.utc)).total_seconds()
+                if application and quiz.end_time:  # Check if application is not None
+                    seconds_until_end = (
+                        quiz.end_time - datetime.now(timezone.utc)
+                    ).total_seconds()
                     if seconds_until_end > 0:
+                        # Ensure schedule_auto_distribution is an async function
+                        # and that create_task is appropriate.
+                        # If schedule_auto_distribution itself uses job_queue.run_once,
+                        # it might not need to be a coroutine passed to create_task.
+                        # However, if it performs async operations before scheduling, this is fine.
                         application.create_task(
-                            schedule_auto_distribution(
+                            schedule_auto_distribution(  # Pass application here
                                 application, quiz_id, seconds_until_end
                             )
                         )
@@ -433,7 +440,9 @@ async def save_quiz_payment_hash(quiz_id: str, payment_hash: str) -> bool:
                             f"Scheduled auto distribution for quiz {quiz_id} in {seconds_until_end} seconds upon activation."
                         )
                     else:
-                        logger.warning(f"Quiz {quiz_id} activated but already past its intended end time. Auto-distribution may not run as expected.")
+                        logger.warning(
+                            f"Quiz {quiz_id} activated but already past its intended end time. Auto-distribution may not run as expected."
+                        )
             else:
                 logger.info(f"Quiz {quiz_id} activated without a specific duration.")
 
@@ -492,12 +501,20 @@ async def get_quiz_details(quiz_id: str) -> Optional[dict]:
                 "end_time": quiz.end_time.isoformat() if quiz.end_time else None,
                 "winners_announced": quiz.winners_announced,
                 "created_at": quiz.created_at.isoformat() if quiz.created_at else None,
+                "activated_at": quiz.activated_at.isoformat() if hasattr(quiz, 'activated_at') and quiz.activated_at else None,
+                "duration_seconds": quiz.duration_seconds if hasattr(quiz, 'duration_seconds') else None
             }
             # Cache for 1 hour, or less if quiz is active and ending soon
             cache_duration = 3600
             if quiz.status == QuizStatus.ACTIVE and quiz.end_time:
+                end_time_aware = quiz.end_time
+                # If quiz.end_time is naive, assume it's UTC and make it aware.
+                if end_time_aware.tzinfo is None or end_time_aware.tzinfo.utcoffset(end_time_aware) is None:
+                    end_time_aware = end_time_aware.replace(tzinfo=timezone.utc)
+
+                current_time_aware = datetime.now(timezone.utc)
                 seconds_to_end = (
-                    quiz.end_time - datetime.now(timezone.utc)
+                    end_time_aware - current_time_aware
                 ).total_seconds()
                 # Cache for a shorter duration if ending soon, but not too short (min 5 mins)
                 cache_duration = (
@@ -1287,7 +1304,7 @@ async def distribute_quiz_rewards(update: Update, context: CallbackContext):
 
 
 async def schedule_auto_distribution(
-    application: ContextTypes.DEFAULT_TYPE, quiz_id: str, delay_seconds: float
+    application: "Application", quiz_id: str, delay_seconds: float
 ):
     """Schedule automatic reward distribution after the quiz ends."""
     redis_client_instance = None
