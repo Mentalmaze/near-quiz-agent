@@ -26,7 +26,7 @@ class Quiz(Base):
     reward_schedule = Column(JSON, default={})
     deposit_address = Column(String, nullable=True)
     payment_transaction_hash = Column(
-        String, nullable=True, index=True  # Added index
+        String, nullable=True, unique=True, index=True  # Added index and unique constraint
     )  # For user's funding transaction
     # New columns
     last_updated = Column(

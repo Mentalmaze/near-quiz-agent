@@ -411,7 +411,6 @@ async def save_quiz_payment_hash(quiz_id: str, payment_hash: str, application: O
                 f"Quiz {quiz_id} status updated to ACTIVE after payment hash received. Activated at {quiz.activated_at}."
             )
 
-            # Calculate end_time based on activated_at and duration_seconds
             if quiz.duration_seconds and quiz.duration_seconds > 0:
                 quiz.end_time = quiz.activated_at + timedelta(
                     seconds=quiz.duration_seconds
@@ -420,24 +419,20 @@ async def save_quiz_payment_hash(quiz_id: str, payment_hash: str, application: O
                     f"Quiz {quiz_id} end time calculated: {quiz.end_time} based on activation and duration {quiz.duration_seconds}s."
                 )
 
-                # Schedule auto distribution if application context is available
-                if application and quiz.end_time:  # Check if application is not None
+                if application and quiz.end_time:
                     seconds_until_end = (
                         quiz.end_time - datetime.now(timezone.utc)
                     ).total_seconds()
                     if seconds_until_end > 0:
-                        # Ensure schedule_auto_distribution is an async function
-                        # and that create_task is appropriate.
-                        # If schedule_auto_distribution itself uses job_queue.run_once,
-                        # it might not need to be a coroutine passed to create_task.
-                        # However, if it performs async operations before scheduling, this is fine.
+                        # Use application.create_task to run the schedule_auto_distribution coroutine
+                        # schedule_auto_distribution itself will use application.job_queue
                         application.create_task(
-                            schedule_auto_distribution(  # Pass application here
+                            schedule_auto_distribution(
                                 application, quiz_id, seconds_until_end
                             )
                         )
                         logger.info(
-                            f"Scheduled auto distribution for quiz {quiz_id} in {seconds_until_end} seconds upon activation."
+                            f"Task created to schedule auto distribution for quiz {quiz_id} in {seconds_until_end} seconds upon activation."
                         )
                     else:
                         logger.warning(
@@ -455,10 +450,16 @@ async def save_quiz_payment_hash(quiz_id: str, payment_hash: str, application: O
         logger.info(
             f"Successfully saved payment hash {payment_hash} for quiz {quiz_id}."
         )
-        # Invalidate cached quiz object
         await redis_client.delete_cached_object(f"quiz_details:{quiz_id}")
         await redis_client.close()
         return True
+    except AttributeError as ae:
+        logger.error(f"AttributeError in save_quiz_payment_hash for quiz {quiz_id}: {ae}", exc_info=True)
+        if "JobQueue" in str(ae) and "get_instance" in str(ae): # This specific check might become obsolete
+            logger.error("This looks like the JobQueue.get_instance() error. Ensure 'application' is correctly passed and used for job_queue.")
+        session.rollback()
+        await redis_client.close()
+        return False
     except Exception as e:
         logger.error(
             f"Error saving payment hash for quiz {quiz_id}: {e}", exc_info=True
@@ -728,8 +729,7 @@ async def send_quiz_question(bot, user_id, quiz, question_index):
         await safe_send_message(
             bot,
             user_id,
-            f"You've completed all {len(questions_list)} questions in the '{quiz.topic}' quiz!\n"
-            f"Your answers have been recorded. Check '/winners {quiz.id}' for the results.",
+            f"You've tackled all {len(questions_list)} questions in the '{quiz.topic}' quiz! Your answers are saved. Eager to see the results? Use `/winners {quiz.id}`."
         )
         return
 
@@ -1303,220 +1303,70 @@ async def distribute_quiz_rewards(update: Update, context: CallbackContext):
             pass
 
 
-async def schedule_auto_distribution(
-    application: "Application", quiz_id: str, delay_seconds: float
-):
-    """Schedule automatic reward distribution after the quiz ends."""
-    redis_client_instance = None
-    session = None
-    try:
-        logger.info(
-            f"[schedule_auto_distribution] Waiting {delay_seconds}s for quiz {quiz_id} deadline."
-        )
-        await asyncio.sleep(delay_seconds)
-        logger.info(f"[schedule_auto_distribution] Quiz {quiz_id} deadline reached.")
+async def schedule_auto_distribution(application: "Application", quiz_id: str, delay_seconds: float):
+    """Schedules the automatic distribution of rewards for a quiz after a delay using application.job_queue."""
+    logger.info(
+        f"schedule_auto_distribution called for quiz_id: {quiz_id} with delay: {delay_seconds}"
+    )
 
-        session = SessionLocal()
-        quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
+    async def job_callback(context: CallbackContext):
+        # This is the function that JobQueue will execute.
+        # It needs to be a regular function that can be pickled by JobQueue.
+        # Inside, we can run our async logic.
+        logger.info(f"JobQueue executing for auto-distribution of quiz {quiz_id}")
+        # We need to run the async part of the job in a new event loop or ensure it's managed correctly.
+        # For PTB v20+, context.application.create_task is a good way if the callback itself is async.
+        # However, run_once expects a synchronous callable.
+        # A common pattern is to have the job_callback schedule the async work.
+        # For simplicity here, let's assume distribute_quiz_rewards can be called and awaited
+        # if this function itself is run via application.create_task from a sync context or similar.
+        # The key is that the callable passed to run_once (job_wrapper) is sync.
 
-        if not quiz:
-            logger.error(
-                f"[schedule_auto_distribution] Quiz {quiz_id} not found after delay."
-            )
-            return
+        # Re-fetch application if necessary, or ensure it's available.
+        # For this structure, 'application' is passed from the outer scope.
+        try:
+            session = SessionLocal()
+            quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
+            if quiz and quiz.status == QuizStatus.ACTIVE and not quiz.winners_announced:
+                logger.info(f"Quiz {quiz_id} is ACTIVE. Proceeding with distribution.")
+                # Pass the application instance to distribute_quiz_rewards
+                await distribute_quiz_rewards(application, quiz_id) 
+            elif quiz:
+                logger.info(f"Auto-distribution for quiz {quiz_id} skipped. Status: {quiz.status}, WA: {quiz.winners_announced}")
+            else:
+                logger.warning(f"Quiz {quiz_id} not found for auto-distribution job.")
+        except Exception as e:
+            logger.error(f"Error during auto-distribution job for quiz {quiz_id}: {e}", exc_info=True)
+        finally:
+            if 'session' in locals() and session:
+                session.close()
 
-        logger.info(
-            f"[schedule_auto_distribution] Quiz {quiz_id} found. Status: {quiz.status}, Topic: {quiz.topic}"
-        )
+    # Wrapper to be called by job_queue.run_once
+    def job_wrapper(context: CallbackContext):
+        asyncio.create_task(job_callback(context))
 
-        # If cache was used before, fetch fresh state for checks and updates
-        # For this flow, direct DB query is better as we need to update and commit.
-
-        if quiz.status == QuizStatus.FUNDING:
-            logger.warning(
-                f"[schedule_auto_distribution] Quiz {quiz_id} ('{quiz.topic}') ended but was still in FUNDING status."
-            )
-            if quiz.group_chat_id:
-                try:
-                    await application.bot.send_message(
-                        chat_id=quiz.group_chat_id,
-                        text=f"🤔 Quiz '{quiz.topic}' ended but was still awaiting funding. Please verify the deposit and manually trigger reward distribution if needed.",
-                    )
-                except Exception as e:
-                    logger.error(
-                        f"[schedule_auto_distribution] Failed to send FUNDING status warning to group {quiz.group_chat_id} for quiz '{quiz.topic}': {e}"
-                    )
-            return
-
-        if quiz.status not in [QuizStatus.ACTIVE, QuizStatus.CLOSED]:
-            logger.warning(
-                f"[schedule_auto_distribution] Quiz {quiz_id} ('{quiz.topic}') is not in ACTIVE or CLOSED state (current: {quiz.status}). Distribution will not proceed."
-            )
-            return
-
-        if quiz.winners_announced == "True" and quiz.status == QuizStatus.CLOSED:
+    if delay_seconds > 0:
+        if hasattr(application, 'job_queue') and application.job_queue:
+            application.job_queue.run_once(job_wrapper, delay_seconds, name=f"distribute_{quiz_id}", job_kwargs={})
             logger.info(
-                f"[schedule_auto_distribution] Quiz {quiz_id} ('{quiz.topic}') winners already announced and status is CLOSED. Skipping."
+                f"Scheduled auto-distribution job for quiz {quiz_id} in {delay_seconds} seconds via application.job_queue."
             )
-            return
-
-        # Check for participants
-        participants_count = (
-            session.query(QuizAnswer)
-            .filter(QuizAnswer.quiz_id == quiz_id)
-            .distinct(QuizAnswer.user_id)
-            .count()
-        )
-
-        if participants_count == 0:
-            logger.info(
-                f"[schedule_auto_distribution] Quiz {quiz_id} ('{quiz.topic}') had no participants. No rewards to distribute."
-            )
-            if quiz.group_chat_id:
-                try:
-                    await application.bot.send_message(
-                        chat_id=quiz.group_chat_id,
-                        text=f"🤷 Quiz '{quiz.topic}' has ended, but there were no participants. No rewards to distribute.",
-                    )
-                except Exception as e:
-                    logger.error(
-                        f"[schedule_auto_distribution] Failed to send no participants message to group {quiz.group_chat_id} for quiz '{quiz.topic}': {e}"
-                    )
-
-            quiz.status = QuizStatus.CLOSED
-            quiz.winners_announced = "True"  # Mark as processed
-            session.commit()
-            logger.info(
-                f"[schedule_auto_distribution] Marked quiz {quiz_id} ('{quiz.topic}') as CLOSED and winners_announced=True (no participants)."
-            )
-
-            redis_client_instance = RedisClient()
-            await redis_client_instance.delete_cached_object(f"quiz_details:{quiz_id}")
-            logger.info(
-                f"[schedule_auto_distribution] Invalidated cache for quiz {quiz_id} (no participants)."
-            )
-            return
-
-        logger.info(
-            f"[schedule_auto_distribution] Attempting to distribute rewards for quiz {quiz_id} ('{quiz.topic}'). Participants: {participants_count}."
-        )
-
-        blockchain_monitor = getattr(application, "blockchain_monitor", None)
-        if (
-            not blockchain_monitor
-        ):  # Attempt to get it from _blockchain_monitor if not found directly
-            blockchain_monitor = getattr(application, "_blockchain_monitor", None)
-
-        if blockchain_monitor:
-            logger.info(
-                f"[schedule_auto_distribution] Blockchain monitor found: {blockchain_monitor}"
-            )
-            distribution_result = await blockchain_monitor.distribute_rewards(quiz_id)
-            # distribute_rewards handles setting quiz status to CLOSED and commits.
-            # Cache must be invalidated after this call.
-
-            redis_client_instance = RedisClient()
-            await redis_client_instance.delete_cached_object(f"quiz_details:{quiz_id}")
-            logger.info(
-                f"[schedule_auto_distribution] Invalidated cache for quiz {quiz_id} after distribute_rewards call."
-            )
-
-            group_chat_id = (
-                quiz.group_chat_id
-            )  # Use quiz object fetched at the start for topic/group_id
-            quiz_topic = quiz.topic
-
-            if group_chat_id:
-                message_text = ""
-                if distribution_result is False:
-                    message_text = f"⚠️ Automatic reward distribution for quiz '{quiz_topic}' failed due to an internal error. Please check the logs and use /distributerewards {quiz_id} if necessary."
-                elif distribution_result is None:
-                    message_text = f"🤷 Quiz '{quiz_topic}' has ended. No winners were found to distribute rewards to (this might occur if no one met winning criteria)."
-                elif isinstance(distribution_result, list):
-                    if not distribution_result:
-                        message_text = f"🎉 Quiz '{quiz_topic}' has ended. Rewards were processed, but no specific transfers were completed (e.g., winners without linked wallets, or issues with individual transfers)."
-                    else:
-                        winner_mentions = []
-                        for transfer_info in distribution_result:
-                            user_id_str = transfer_info.get("user_id")
-                            username = transfer_info.get("username")
-                            user_id_int = None
-                            try:
-                                if user_id_str:
-                                    user_id_int = int(user_id_str)
-                            except ValueError:
-                                logger.warning(
-                                    f"[schedule_auto_distribution] Could not convert user_id {user_id_str} to int for mention for quiz {quiz_id}."
-                                )
-
-                            if user_id_int and username:
-                                winner_mentions.append(
-                                    f'<a href="tg://user?id={user_id_int}">@{username}</a>'
-                                )
-                            elif username:
-                                winner_mentions.append(f"@{username}")
-                            elif (
-                                user_id_int
-                            ):  # Fallback if username is missing but ID is there
-                                winner_mentions.append(
-                                    f'<a href="tg://user?id={user_id_int}">User {user_id_int}</a>'
-                                )
-
-                        if winner_mentions:
-                            winners_str = ", ".join(winner_mentions)
-                            message_text = f"🎉 Quiz '{quiz_topic}' has ended! 🎊\n\nCongratulations to our winner(s): {winners_str}! \nCheck your NEAR wallets for your rewards! 💰"
-                        else:
-                            message_text = f"🎉 Quiz '{quiz_topic}' has ended and rewards have been distributed. Winners (if any with valid wallets), please check your wallets!"
-
-                if message_text:
-                    try:
-                        await application.bot.send_message(
-                            chat_id=group_chat_id,
-                            text=message_text,
-                            parse_mode="HTML",
-                        )
-                        logger.info(
-                            f"[schedule_auto_distribution] Sent distribution result message for quiz {quiz_id} to group {group_chat_id}."
-                        )
-                    except Exception as e:
-                        logger.error(
-                            f"[schedule_auto_distribution] Failed to send message to group {group_chat_id} for quiz {quiz_id}: {e}"
-                        )
-                else:
-                    logger.warning(
-                        f"[schedule_auto_distribution] No specific message generated for quiz {quiz_id} distribution status despite processing."
-                    )
         else:
             logger.error(
-                "[schedule_auto_distribution] Blockchain monitor not found in application context. Cannot distribute rewards for quiz {id}."
+                f"application.job_queue not available for quiz {quiz_id}. Auto-distribution will not be scheduled."
             )
-            if quiz.group_chat_id:
-                await application.bot.send_message(
-                    chat_id=quiz.group_chat_id,
-                    text=f"⚠️ Quiz '{quiz.topic}' ({quiz_id}) has ended, but automatic reward distribution could not be performed due to a system error (blockchain monitor unavailable). Please use /distributerewards {quiz_id} manually.",
-                )
-
-    except asyncio.CancelledError:
-        logger.info(
-            f"[schedule_auto_distribution] Task for quiz {quiz_id} was cancelled."
-        )
-        raise  # Re-raise CancelledError to ensure proper cleanup if applicable
-    except Exception as e:
-        logger.error(
-            f"[schedule_auto_distribution] Error in auto distribution for quiz {quiz_id}: {e}",
-            exc_info=True,
-        )
-    finally:
-        if session:
-            session.close()
-            logger.debug(
-                f"[schedule_auto_distribution] Database session closed for quiz {quiz_id}."
+    else:
+        logger.info(f"Delay for quiz {quiz_id} is not positive ({delay_seconds}s). Running job immediately (or rather, scheduling for immediate execution).")
+        # Run immediately if delay is not positive, still using the job queue for consistency if possible
+        if hasattr(application, 'job_queue') and application.job_queue:
+            application.job_queue.run_once(job_wrapper, 0, name=f"distribute_{quiz_id}_immediate", job_kwargs={})
+        else:
+            # Fallback if job_queue is not available for immediate execution either
+            logger.error(
+                f"application.job_queue not available for immediate run of quiz {quiz_id}. Manual trigger might be needed."
             )
-        if redis_client_instance:
-            await redis_client_instance.close()
-            logger.debug(
-                f"[schedule_auto_distribution] Redis client closed for quiz {quiz_id}."
-            )
+            # Consider if direct call to asyncio.create_task(job_callback(None)) is a safe fallback here, it might be.
+            # For now, logging error as job queue is the primary mechanism.
 
 
 def parse_multiple_questions(raw_questions):

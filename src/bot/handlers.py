@@ -731,7 +731,7 @@ async def private_message_handler(update: Update, context: CallbackContext):
 
         # Pass context.application to save_quiz_payment_hash
         save_success = await save_quiz_payment_hash(
-            quiz_id_awaiting_hash, payment_hash, context.application
+            quiz_id_awaiting_hash, payment_hash, context.application # Pass application context
         )
 
         if save_success:
