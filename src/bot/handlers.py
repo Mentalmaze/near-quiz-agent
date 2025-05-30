@@ -790,7 +790,7 @@ async def private_message_handler(update: Update, context: CallbackContext):
                         await context.bot.send_message(
                             chat_id=quiz.group_chat_id,
                             text=announce_text,
-                            parse_mode="Markdown",
+                            parse_mode="MarkdownV2",
                         )
                         logger.info("Announcement sent successfully.")
                     except Exception as e:
@@ -819,6 +819,34 @@ async def private_message_handler(update: Update, context: CallbackContext):
                         await context.bot.send_message(
                             chat_id=quiz.group_chat_id, text=plain_announce_text
                         )
+                    finally:
+                        # Activate quiz and set end time when funded
+                        from models.quiz import QuizStatus
+                        from datetime import datetime, timedelta
+
+                        session2 = SessionLocal()
+                        try:
+                            q = (
+                                session2.query(Quiz)
+                                .filter(Quiz.id == quiz_id_awaiting_hash)
+                                .first()
+                            )
+                            if q:
+                                q.status = QuizStatus.ACTIVE
+                                q.activated_at = datetime.utcnow()
+                                if q.duration_seconds:
+                                    q.end_time = q.activated_at + timedelta(
+                                        seconds=q.duration_seconds
+                                    )
+                                session2.commit()
+                                # Schedule auto distribution
+                                await schedule_auto_distribution(
+                                    context.application,
+                                    q.id,
+                                    q.duration_seconds or 0,
+                                )
+                        finally:
+                            session2.close()
             except Exception as e:
                 logger.error(f"Error during quiz announcement: {e}", exc_info=True)
             finally:
@@ -1108,7 +1136,6 @@ async def show_all_active_leaderboards_command(
                 context.bot,
                 update.effective_chat.id,
                 text=full_message,
-                parse_mode="HTML",
             )
             num_leaderboards_sent += 1
             if num_leaderboards_sent < len(
@@ -1119,6 +1146,11 @@ async def show_all_active_leaderboards_command(
     except Exception as e:
         logger.error(
             f"Error in show_all_active_leaderboards_command: {e}", exc_info=True
+        )
+        await safe_send_message(
+            context.bot,
+            update.effective_chat.id,
+            "⚠️ An error occurred while fetching leaderboards. Please try again later.",
         )
         await safe_send_message(
             context.bot,

@@ -62,6 +62,15 @@ class TelegramBot:
                 # If we have an update object, we can respond to the user
                 if isinstance(error, TimedOut):
                     logger.warning(f"Timeout error when processing update {update}")
+                    # Prompt user to retry when a timeout occurs
+                    try:
+                        if isinstance(update, Update) and update.effective_chat:
+                            await context.bot.send_message(
+                                chat_id=update.effective_chat.id,
+                                text="⏱️ Sorry, that operation took too long. Please try again.",
+                            )
+                    except Exception as e:
+                        logger.error(f"Failed to notify user of timeout: {e}")
                     # Don't try to respond on timeout errors, it might cause another timeout
                     return
 
