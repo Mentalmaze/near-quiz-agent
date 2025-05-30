@@ -790,7 +790,7 @@ async def private_message_handler(update: Update, context: CallbackContext):
                         await context.bot.send_message(
                             chat_id=quiz.group_chat_id,
                             text=announce_text,
-                            parse_mode="MarkdownV2",
+                            parse_mode="Markdown",
                         )
                         logger.info("Announcement sent successfully.")
                     except Exception as e:
@@ -1098,12 +1098,7 @@ async def show_all_active_leaderboards_command(
                         f"{is_winner_char}{rank}. @{username} - Score: {score}, Time: {time_str}"
                     )
 
-            message_parts.append(
-                f"\n➡️ Play this quiz: `/playquiz {leaderboard_data.get('quiz_id', '')}`"
-            )
-            message_parts.append("--------------------")
-
-            full_message = "\\n".join(message_parts)  # Use \\n for MarkdownV2 newlines
+            full_message = "\n".join(message_parts)  # Use \\n for MarkdownV2 newlines
 
             # Using MarkdownV2, ensure _escape_markdown_v2_specials is robust
             # or switch to HTML if complex formatting is easier.
@@ -1113,7 +1108,7 @@ async def show_all_active_leaderboards_command(
                 context.bot,
                 update.effective_chat.id,
                 text=full_message,
-                parse_mode="MarkdownV2",
+                parse_mode="HTML",
             )
             num_leaderboards_sent += 1
             if num_leaderboards_sent < len(

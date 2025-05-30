@@ -1,5 +1,5 @@
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import CallbackContext, ContextTypes
+from telegram.ext import CallbackContext, ContextTypes, Application
 from models.quiz import Quiz, QuizStatus, QuizAnswer
 from store.database import SessionLocal
 from agent import generate_quiz
