@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 import traceback
 from utils.config import Config
 from utils.redis_client import RedisClient
-from typing import Optional, TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING, Union
 
 if TYPE_CHECKING:
     from telegram.ext import Application  # Forward reference for type hinting
@@ -1230,93 +1230,149 @@ async def get_winners(update: Update, context: CallbackContext):
         session.close()
 
 
-async def distribute_quiz_rewards(update: Update, context: CallbackContext):
-    """Handler for /distributerewards command to send NEAR rewards to winners."""
-    user_id = str(update.effective_user.id)
-
-    # Get quiz ID if provided, otherwise use latest active quiz
+async def distribute_quiz_rewards(
+    update_or_app: Union[Update, "Application"],
+    context_or_quiz_id: Union[CallbackContext, str],
+):
+    """Handler for /distributerewards command or direct call from job queue."""
     quiz_id = None
+    chat_id_to_reply = None
+    bot_to_use = None
 
-    if context.args:
-        quiz_id = context.args[0]
-    else:
-        # Find latest quiz created by this user
-        session = SessionLocal()
-        try:
-            # We need to find quizzes with rewards that are ACTIVE
-            quiz = (
-                session.query(Quiz)
-                .filter(Quiz.status == QuizStatus.ACTIVE)
-                .order_by(Quiz.last_updated.desc())
-                .first()
+    if isinstance(update_or_app, Application) and isinstance(context_or_quiz_id, str):
+        # Called from job queue
+        app = update_or_app
+        quiz_id = context_or_quiz_id
+        # We need a way to get a bot instance. If the application stores one, use it.
+        # This part might need adjustment based on how your Application is structured.
+        if hasattr(app, "bot"):
+            bot_to_use = app.bot
+        else:
+            logger.error(
+                "Job queue call: Bot instance not found in application context."
             )
+            return  # Cannot send messages without a bot instance
+        # For job queue, we might not have a specific chat to reply to initially,
+        # but we might fetch it from the quiz details later if needed.
 
-            if quiz:
-                quiz_id = quiz.id
-        finally:
-            session.close()
+    elif isinstance(update_or_app, Update) and isinstance(
+        context_or_quiz_id, CallbackContext
+    ):
+        # Called by user command
+        update = update_or_app
+        context = context_or_quiz_id
+        app = context.application
+        bot_to_use = context.bot
+        chat_id_to_reply = update.effective_chat.id
 
-    if not quiz_id:
-        await safe_send_message(
-            context.bot,
-            update.effective_chat.id,
-            "No active quiz found to distribute rewards for. Please specify a quiz ID.",
+        if context.args:
+            quiz_id = context.args[0]
+        else:
+            session = SessionLocal()
+            try:
+                quiz_db = (
+                    session.query(Quiz)
+                    .filter(Quiz.status == QuizStatus.ACTIVE)
+                    .order_by(Quiz.last_updated.desc())
+                    .first()
+                )
+                if quiz_db:
+                    quiz_id = quiz_db.id
+            finally:
+                session.close()
+
+        if not quiz_id:
+            if chat_id_to_reply and bot_to_use:
+                await safe_send_message(
+                    bot_to_use,
+                    chat_id_to_reply,
+                    "No active quiz found to distribute rewards for. Please specify a quiz ID.",
+                )
+            return
+    else:
+        logger.error("distribute_quiz_rewards called with invalid arguments.")
+        return
+
+    if not bot_to_use:
+        logger.error(
+            "Bot instance is not available, cannot proceed with reward distribution."
         )
         return
 
-    # Show processing message
-    processing_msg = await safe_send_message(
-        context.bot,
-        update.effective_chat.id,
-        "🔄 Processing reward distribution... This may take a moment.",
-    )
+    processing_msg = None
+    if chat_id_to_reply:  # Only send processing message if it's a user command
+        processing_msg = await safe_send_message(
+            bot_to_use,
+            chat_id_to_reply,
+            "🔄 Processing reward distribution... This may take a moment.",
+        )
 
     try:
-        # Get the blockchain monitor from the application
-        from telegram.ext import Application
-
-        app = context.application
-        if not hasattr(app, "blockchain_monitor"):
-            # Try to access it from another location in context
-            blockchain_monitor = getattr(app, "_blockchain_monitor", None)
-            if not blockchain_monitor:
+        blockchain_monitor = getattr(app, "blockchain_monitor", None) or getattr(
+            app, "_blockchain_monitor", None
+        )
+        if not blockchain_monitor:
+            if chat_id_to_reply:
                 await safe_send_message(
-                    context.bot,
-                    update.effective_chat.id,
+                    bot_to_use,
+                    chat_id_to_reply,
                     "❌ Blockchain monitor not available. Please contact an administrator.",
                 )
-                return
-        else:
-            blockchain_monitor = app.blockchain_monitor
+            logger.error("Blockchain monitor not available.")
+            return
 
-        # Initiate reward distribution
         success = await blockchain_monitor.distribute_rewards(quiz_id)
 
-        if success:
-            await safe_send_message(
-                context.bot,
-                update.effective_chat.id,
-                f"✅ Successfully distributed rewards for quiz {quiz_id}. Winners have been notified.",
-            )
+        # If called from job, we might want to announce in the quiz's group chat
+        # This requires fetching the group_chat_id from the quiz object
+        final_message_chat_id = chat_id_to_reply
+        if not final_message_chat_id:
+            session = SessionLocal()
+            try:
+                quiz_db_for_chat_id = (
+                    session.query(Quiz.group_chat_id)
+                    .filter(Quiz.id == quiz_id)
+                    .scalar()
+                )
+                if quiz_db_for_chat_id:
+                    final_message_chat_id = quiz_db_for_chat_id
+            finally:
+                session.close()
+
+        if final_message_chat_id:
+            if success:
+                await safe_send_message(
+                    bot_to_use,
+                    final_message_chat_id,
+                    f"✅ Successfully distributed rewards for quiz {quiz_id}. Winners have been notified.",
+                )
+            else:
+                await safe_send_message(
+                    bot_to_use,
+                    final_message_chat_id,
+                    f"⚠️ Could not distribute all rewards for quiz {quiz_id}. Check logs for details.",
+                )
         else:
-            await safe_send_message(
-                context.bot,
-                update.effective_chat.id,
-                f"⚠️ Could not distribute all rewards. Check logs for details.",
+            logger.info(
+                f"Reward distribution for {quiz_id} complete (success: {success}), but no chat_id to announce to."
             )
+
     except Exception as e:
-        logger.error(f"Error distributing rewards: {e}", exc_info=True)
-        await safe_send_message(
-            context.bot,
-            update.effective_chat.id,
-            f"❌ Error distributing rewards: {str(e)}",
+        logger.error(
+            f"Error distributing rewards for quiz {quiz_id}: {e}", exc_info=True
         )
+        if chat_id_to_reply:  # Only send error to user if it was a user command
+            await safe_send_message(
+                bot_to_use,
+                chat_id_to_reply,
+                f"❌ Error distributing rewards for quiz {quiz_id}: {str(e)}",
+            )
     finally:
-        # Try to delete the processing message
-        try:
-            await processing_msg.delete()
-        except:
-            pass
+        if processing_msg:
+            try:
+                await processing_msg.delete()
+            except Exception:
+                pass  # Ignore if message deletion fails
 
 
 async def schedule_auto_distribution(
@@ -1327,27 +1383,16 @@ async def schedule_auto_distribution(
         f"schedule_auto_distribution called for quiz_id: {quiz_id} with delay: {delay_seconds}"
     )
 
-    async def job_callback(context: CallbackContext):
-        # This is the function that JobQueue will execute.
-        # It needs to be a regular function that can be pickled by JobQueue.
-        # Inside, we can run our async logic.
+    async def job_callback(
+        context: CallbackContext,
+    ):  # context here is from JobQueue, not a command
         logger.info(f"JobQueue executing for auto-distribution of quiz {quiz_id}")
-        # We need to run the async part of the job in a new event loop or ensure it's managed correctly.
-        # For PTB v20+, context.application.create_task is a good way if the callback itself is async.
-        # However, run_once expects a synchronous callable.
-        # A common pattern is to have the job_callback schedule the async work.
-        # For simplicity here, let's assume distribute_quiz_rewards can be called and awaited
-        # if this function itself is run via application.create_task from a sync context or similar.
-        # The key is that the callable passed to run_once (job_wrapper) is sync.
-
-        # Re-fetch application if necessary, or ensure it's available.
-        # For this structure, 'application' is passed from the outer scope.
         try:
             session = SessionLocal()
             quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
             if quiz and quiz.status == QuizStatus.ACTIVE and not quiz.winners_announced:
                 logger.info(f"Quiz {quiz_id} is ACTIVE. Proceeding with distribution.")
-                # Pass the application instance to distribute_quiz_rewards
+                # Pass the application instance and quiz_id directly
                 await distribute_quiz_rewards(application, quiz_id)
             elif quiz:
                 logger.info(
@@ -1366,7 +1411,10 @@ async def schedule_auto_distribution(
 
     # Wrapper to be called by job_queue.run_once
     def job_wrapper(context: CallbackContext):
-        asyncio.create_task(job_callback(context))
+        # context here is from JobQueue, not a command
+        # We pass context.application to job_callback if it needs it,
+        # but distribute_quiz_rewards now takes application directly.
+        asyncio.create_task(job_callback(context))  # Pass the job queue's context
 
     if delay_seconds > 0:
         if hasattr(application, "job_queue") and application.job_queue:
@@ -1382,20 +1430,19 @@ async def schedule_auto_distribution(
             )
     else:
         logger.info(
-            f"Delay for quiz {quiz_id} is not positive ({delay_seconds}s). Running job immediately (or rather, scheduling for immediate execution)."
+            f"Delay for quiz {quiz_id} is not positive ({delay_seconds}s). Running job immediately."
         )
-        # Run immediately if delay is not positive, still using the job queue for consistency if possible
         if hasattr(application, "job_queue") and application.job_queue:
             application.job_queue.run_once(
                 job_wrapper, 0, name=f"distribute_{quiz_id}_immediate", job_kwargs={}
             )
         else:
-            # Fallback if job_queue is not available for immediate execution either
             logger.error(
-                f"application.job_queue not available for immediate run of quiz {quiz_id}. Manual trigger might be needed."
+                f"application.job_queue not available for immediate run of quiz {quiz_id}."
             )
-            # Consider if direct call to asyncio.create_task(job_callback(None)) is a safe fallback here, it might be.
-            # For now, logging error as job queue is the primary mechanism.
+
+
+# ... rest of the file
 
 
 def parse_multiple_questions(raw_questions):

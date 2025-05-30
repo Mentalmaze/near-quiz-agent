@@ -51,13 +51,17 @@ def _escape_markdown_v2_specials(text: str) -> str:
     if not text:  # Ensure text is not None
         return ""
     text = str(text)  # Ensure text is a string
-    text = text.replace(".", "\.")
-    text = text.replace("!", "\!")
-    text = text.replace("-", "\-")
-    text = text.replace("(", "\(")
-    text = text.replace(")", "\)")
-    text = text.replace("+", "\+")
-    text = text.replace("=", "\=")
+    # Escape existing characters
+    text = text.replace(".", "\\.")
+    text = text.replace("!", "\\!")
+    text = text.replace("-", "\\-")
+    text = text.replace("(", "\\(")
+    text = text.replace(")", "\\)")
+    text = text.replace("+", "\\+")
+    text = text.replace("=", "\\=")
+    # Add escaping for > and <
+    text = text.replace(">", "\\>")
+    text = text.replace("<", "\\<")
     # Add other characters if they become problematic and are not part of intended Markdown like backticks or links.
     return text
 
