@@ -36,6 +36,8 @@ from store.database import SessionLocal
 from models.quiz import Quiz
 from utils.redis_client import RedisClient  # Added RedisClient import
 from utils.telegram_helpers import safe_send_message  # Ensure this is imported
+import html  # Add this import
+from datetime import datetime, timezone  # Add this import
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -1052,96 +1054,112 @@ async def distribute_rewards_handler(update: Update, context: CallbackContext):
 async def show_all_active_leaderboards_command(
     update: Update, context: CallbackContext
 ):
-    """Shows leaderboards for all currently active quizzes."""
-    user = update.effective_user
-    if not user:
-        logger.warning("Cannot identify user for show_all_active_leaderboards_command")
-        # Optionally send a message if update.message is available
-        if update.message:
-            await update.message.reply_text("Could not identify user.")
-        return
-
-    logger.info(f"User {user.id} requested active leaderboards.")
-
+    """Displays leaderboards for all active quizzes in a more user-friendly format."""
+    session = SessionLocal()
     try:
-        list_of_leaderboards = await get_leaderboards_for_all_active_quizzes()
+        active_quizzes = get_leaderboards_for_all_active_quizzes()
 
-        if not list_of_leaderboards:
+        if not active_quizzes:
             await safe_send_message(
                 context.bot,
                 update.effective_chat.id,
-                "✨ No quizzes are currently active, or no one has played them yet!",
+                "🏁 No active quizzes found at the moment. Create one with /createquiz!",
             )
             return
 
-        num_leaderboards_sent = 0
-        for leaderboard_data in list_of_leaderboards:
-            quiz_topic = leaderboard_data.get("quiz_topic", "N/A")
-            reward_description = leaderboard_data.get(
-                "reward_description", "Not specified"
-            )
-            participants = leaderboard_data.get("participants", [])
-            quiz_id_short = leaderboard_data.get("quiz_id", "N/A")[
-                :8
-            ]  # Short ID for display
+        response_message = "🏆 <b>Active Quiz Leaderboards</b> 🏆\n\n"
 
-            message_parts = [
-                f'🏆 <b>Quiz: "{_escape_markdown_v2_specials(quiz_topic)}"</b> (ID: {quiz_id_short}) - Live!',
-                f"🏅 Reward: {_escape_markdown_v2_specials(reward_description)}\n",
-            ]
+        for quiz_info in active_quizzes:
+            quiz_id_short = quiz_info["id"][:8]
+            response_message += f"<pre>------------------------------</pre>\n"
+            # Corrected f-string syntax below
+            response_message += f"🎯 <b>Quiz: \"{html.escape(quiz_info['topic'])}\"</b> (ID: {quiz_id_short})\n"
 
-            if not participants:
-                message_parts.append(
-                    "<i>No one has played this quiz yet. Be the first!</i> `/playquiz {leaderboard_data.get('quiz_id', '')}`"
-                )
-            else:
-                message_parts.append("<b>Leaderboard:</b>")
-                for p_idx, p in enumerate(participants):
+            reward_text = "Not specified"
+            if quiz_info.get("reward_schedule") and isinstance(
+                quiz_info["reward_schedule"], dict
+            ):
+                details_text = quiz_info["reward_schedule"].get("details_text")
+                if details_text:
+                    reward_text = html.escape(details_text)
+                else:
                     if (
-                        p_idx >= 10 and len(participants) > 12
-                    ):  # Limit display if too many, show top 10 and "..."
-                        message_parts.append(
-                            f"<i>... and {len(participants) - p_idx} more participants.</i>"
-                        )
-                        break
-
-                    rank = p.get("rank", "-")
-                    username = _escape_markdown_v2_specials(
-                        p.get("username", "Unknown")
-                    )
-                    score = p.get("score", 0)
-                    time_taken_seconds = p.get("time_taken")
-                    is_winner_char = "👑 " if p.get("is_winner", False) else ""
-
-                    time_str = "-"
-                    if (
-                        isinstance(time_taken_seconds, (int, float))
-                        and time_taken_seconds != float("inf")
-                        and time_taken_seconds >= 0
+                        isinstance(quiz_info["reward_schedule"], dict)
+                        and quiz_info["reward_schedule"].get("type")
+                        and quiz_info["reward_schedule"].get("details_text")
                     ):
-                        # Simple seconds formatting, can be expanded (e.g., to M:SS)
-                        time_str = f"{time_taken_seconds:.2f}s"
+                        reward_text = html.escape(
+                            quiz_info["reward_schedule"]["details_text"]
+                        )
+                    elif isinstance(quiz_info["reward_schedule"], str):
+                        reward_text = html.escape(quiz_info["reward_schedule"])
+                    else:
+                        reward_text = "Complex schedule"
+            elif isinstance(
+                quiz_info.get("reward_schedule"), str
+            ):  # Handle if reward_schedule is just a string
+                reward_text = html.escape(quiz_info["reward_schedule"])
 
-                    message_parts.append(
-                        f"{is_winner_char}{rank}. @{username} - Score: {score}, Time: {time_str}"
+            response_message += f"💰 Reward: {reward_text}\n"
+
+            if quiz_info.get("end_time"):
+                try:
+                    end_time_dt = datetime.fromisoformat(
+                        quiz_info["end_time"].replace("Z", "+00:00")
                     )
+                    time_left_str = "Ended"
+                    now_utc = datetime.now(timezone.utc)
+                    if end_time_dt > now_utc:
+                        delta = end_time_dt - now_utc
+                        days, remainder = divmod(delta.total_seconds(), 86400)
+                        hours, remainder = divmod(remainder, 3600)
+                        minutes, _ = divmod(remainder, 60)
+                        time_left_parts = []
+                        if days > 0:
+                            time_left_parts.append(f"{int(days)}d")
+                        if hours > 0:
+                            time_left_parts.append(f"{int(hours)}h")
+                        if minutes > 0 or not time_left_parts:
+                            time_left_parts.append(f"{int(minutes)}m")
+                        # Corrected join logic for time_left_str
+                        if time_left_parts:
+                            time_left_str = " ".join(time_left_parts) + " left"
+                        else:
+                            time_left_str = "Ending soon"
+                    response_message += f"⏳ Ends: {html.escape(end_time_dt.strftime('%b %d, %H:%M UTC'))} ({html.escape(time_left_str)})\n"
+                except ValueError:
+                    response_message += f"⏳ Ends: {html.escape(quiz_info['end_time'])} (Could not parse time)\n"
+            else:
+                response_message += "⏳ Ends: Not specified\n"
 
-            full_message = "\n".join(message_parts)  # Use \\n for MarkdownV2 newlines
+            response_message += "\n"
+            if quiz_info["leaderboard"]:
+                response_message += "<b>Leaderboard:</b>\n"
+                for i, entry in enumerate(quiz_info["leaderboard"][:3]):
+                    rank_emoji = ["🥇", "🥈", "🥉"][i] if i < 3 else "🏅"
+                    username = html.escape(
+                        entry["username"] or f"User_{entry['user_id'][:4]}"
+                    )
+                    score = entry["correct_count"]
+                    response_message += (
+                        f"{rank_emoji} {i+1}. @{username} - Score: {score}\n"
+                    )
+            else:
+                response_message += "<i>No participants yet. Be the first!</i>\n"
 
-            # Using MarkdownV2, ensure _escape_markdown_v2_specials is robust
-            # or switch to HTML if complex formatting is easier.
-            # For now, sticking to MarkdownV2 as per previous _escape_markdown_v2_specials usage.
-            # If MarkdownV2 fails, it will fall back to plain text due to safe_send_message.
-            await safe_send_message(
-                context.bot,
-                update.effective_chat.id,
-                text=full_message,
+            response_message += (
+                f"\n➡️ Play this quiz: <code>/playquiz {quiz_info['id']}</code>\n"
             )
-            num_leaderboards_sent += 1
-            if num_leaderboards_sent < len(
-                list_of_leaderboards
-            ):  # Avoid sleep after last message
-                await asyncio.sleep(0.75)  # Slightly increased delay
+
+        response_message += "<pre>------------------------------</pre>\n"
+        response_message += "\nCreate your own quiz with /createquiz!"
+
+        await safe_send_message(
+            context.bot,
+            update.effective_chat.id,
+            response_message,
+            parse_mode="HTML",
+        )
 
     except Exception as e:
         logger.error(
@@ -1150,10 +1168,7 @@ async def show_all_active_leaderboards_command(
         await safe_send_message(
             context.bot,
             update.effective_chat.id,
-            "⚠️ An error occurred while fetching leaderboards. Please try again later.",
+            "Sorry, I couldn't fetch the leaderboards right now. Please try again later.",
         )
-        await safe_send_message(
-            context.bot,
-            update.effective_chat.id,
-            "⚠️ An error occurred while fetching leaderboards. Please try again later.",
-        )
+    finally:
+        session.close()
