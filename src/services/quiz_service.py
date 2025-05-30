@@ -1323,39 +1323,106 @@ async def distribute_quiz_rewards(
 
         success = await blockchain_monitor.distribute_rewards(quiz_id)
 
-        # If called from job, we might want to announce in the quiz's group chat
-        # This requires fetching the group_chat_id from the quiz object
-        final_message_chat_id = chat_id_to_reply
-        if not final_message_chat_id:
-            session = SessionLocal()
-            try:
-                quiz_db_for_chat_id = (
-                    session.query(Quiz.group_chat_id)
-                    .filter(Quiz.id == quiz_id)
-                    .scalar()
+        # --- Start of new logic for custom winner announcement and status update ---
+        session = SessionLocal()
+        try:
+            quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
+            if not quiz:
+                logger.error(
+                    f"Quiz {quiz_id} not found after reward distribution attempt."
                 )
-                if quiz_db_for_chat_id:
-                    final_message_chat_id = quiz_db_for_chat_id
-            finally:
-                session.close()
+                if chat_id_to_reply and bot_to_use:
+                    await safe_send_message(
+                        bot_to_use,
+                        chat_id_to_reply,
+                        f"❌ Error: Quiz {quiz_id} not found during reward finalization.",
+                    )
+                return  # Exit if quiz not found
 
-        if final_message_chat_id:
             if success:
-                await safe_send_message(
-                    bot_to_use,
-                    final_message_chat_id,
-                    f"✅ Successfully distributed rewards for quiz {quiz_id}. Winners have been notified.",
+                # Blockchain distribution was successful
+                if quiz.group_chat_id and bot_to_use:
+                    winners = QuizAnswer.compute_quiz_winners(session, quiz_id)
+                    final_message_to_group = ""
+                    if winners:
+                        winner_username = winners[0].get("username")
+                        if not winner_username:  # Fallback if username is None or empty
+                            winner_user_id = winners[0].get("user_id", "UnknownUser")
+                            winner_username = (
+                                f"User_{winner_user_id[:6]}"  # Placeholder username
+                            )
+                        final_message_to_group = f'quiz "{quiz.topic}" is officially over. thanks to all the participants our winner is @{winner_username}'
+                    else:
+                        final_message_to_group = f'quiz "{quiz.topic}" is officially over. thanks to all the participants! Unfortunately, there were no winners this time.'
+
+                    await bot_to_use.send_message(
+                        chat_id=quiz.group_chat_id, text=final_message_to_group
+                    )
+                else:
+                    logger.info(
+                        f"Quiz {quiz_id} has no group_chat_id or bot_to_use is unavailable; custom winner message not sent to group."
+                    )
+
+                # Confirmation to user if command was from DM or a different chat than the quiz group
+                if (
+                    chat_id_to_reply
+                    and bot_to_use
+                    and (str(chat_id_to_reply) != str(quiz.group_chat_id))
+                ):
+                    await safe_send_message(
+                        bot_to_use,
+                        chat_id_to_reply,
+                        f"✅ Rewards for quiz '{quiz.topic}' (ID: {quiz_id}) processed. Announcement made in the group.",
+                    )
+
+                quiz.winners_announced = True
+                quiz.status = QuizStatus.CLOSED  # Mark quiz as closed after rewards
+                session.commit()
+                logger.info(
+                    f"Quiz {quiz_id} updated: winners_announced=True, status=CLOSED."
                 )
-            else:
-                await safe_send_message(
-                    bot_to_use,
-                    final_message_chat_id,
-                    f"⚠️ Could not distribute all rewards for quiz {quiz_id}. Check logs for details.",
-                )
-        else:
-            logger.info(
-                f"Reward distribution for {quiz_id} complete (success: {success}), but no chat_id to announce to."
+
+                # Invalidate cache for this quiz
+                redis_client = RedisClient()
+                try:
+                    await redis_client.delete_cached_object(f"quiz_details:{quiz_id}")
+                finally:
+                    await redis_client.close()
+
+            else:  # Blockchain distribution failed
+                target_chat_for_failure = chat_id_to_reply
+                if not target_chat_for_failure and quiz:
+                    target_chat_for_failure = quiz.group_chat_id
+
+                if target_chat_for_failure and bot_to_use:
+                    quiz_topic_name = quiz.topic if quiz else quiz_id
+                    await safe_send_message(
+                        bot_to_use,
+                        target_chat_for_failure,
+                        f"⚠️ Could not distribute rewards for quiz '{quiz_topic_name}'. Please check logs or try again later.",
+                    )
+                else:
+                    logger.error(
+                        f"Failed to distribute rewards for {quiz_id}, and no chat_id to notify."
+                    )
+
+        except Exception as e_db_ops:
+            logger.error(
+                f"DB/notification error for quiz {quiz_id} post-distribution: {e_db_ops}",
+                exc_info=True,
             )
+            if "session" in locals() and session.is_active:
+                session.rollback()
+            if chat_id_to_reply and bot_to_use:
+                await safe_send_message(
+                    bot_to_use,
+                    chat_id_to_reply,
+                    f"❌ An internal error occurred while finalizing rewards for quiz {quiz_id}.",
+                )
+        finally:
+            if "session" in locals() and session:
+                session.close()
+        # --- End of new logic ---
 
     except Exception as e:
         logger.error(
@@ -1410,11 +1477,11 @@ async def schedule_auto_distribution(
                 session.close()
 
     # Wrapper to be called by job_queue.run_once
-    def job_wrapper(context: CallbackContext):
+    async def job_wrapper(context: CallbackContext):  # Make job_wrapper async
         # context here is from JobQueue, not a command
         # We pass context.application to job_callback if it needs it,
         # but distribute_quiz_rewards now takes application directly.
-        asyncio.create_task(job_callback(context))  # Pass the job queue's context
+        await job_callback(context)  # Await the job_callback
 
     if delay_seconds > 0:
         if hasattr(application, "job_queue") and application.job_queue:
