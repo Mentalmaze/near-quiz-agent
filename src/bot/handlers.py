@@ -1031,15 +1031,6 @@ async def show_all_active_leaderboards_command(
 
     logger.info(f"User {user.id} requested active leaderboards.")
 
-    # Acknowledge command immediately
-    try:
-        await update.message.reply_text(
-            "⏳ Fetching live leaderboards, please wait a moment..."
-        )
-    except Exception as e:
-        logger.error(f"Error sending initial wait message: {e}")
-        # Proceed anyway, but log the issue
-
     try:
         list_of_leaderboards = await get_leaderboards_for_all_active_quizzes()
 

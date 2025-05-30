@@ -1568,19 +1568,10 @@ async def _generate_leaderboard_data_for_quiz(
     """
     logger.info(f"Generating leaderboard data for quiz ID: {quiz.id} ('{quiz.topic}')")
 
-    # Eager load user details. Ensure QuizAnswer has a 'user' relationship to the User model.
-    # Also, ensure QuizAnswer has 'score' and 'time_taken_seconds' attributes.
-    quiz_answers = (
-        session.query(QuizAnswer)
-        .filter(QuizAnswer.quiz_id == quiz.id)
-        .options(
-            selectinload(QuizAnswer.user)
-        )  # Switched to selectinload for potentially better performance with many answers
-        .order_by(QuizAnswer.score.desc(), QuizAnswer.time_taken_seconds.asc())
-        .all()
-    )
+    # Generate participant rankings using helper
+    participant_stats = QuizAnswer.get_quiz_participants_ranking(session, quiz.id)
 
-    if not quiz_answers:
+    if not participant_stats:
         logger.info(f"No answers found for quiz ID: {quiz.id}.")
         return {
             "quiz_id": quiz.id,
@@ -1593,34 +1584,14 @@ async def _generate_leaderboard_data_for_quiz(
         }
 
     ranked_participants = []
-    for i, answer in enumerate(quiz_answers):
-        username = "UnknownUser"
-        if (
-            answer.user
-            and hasattr(answer.user, "username_telegram")
-            and answer.user.username_telegram
-        ):
-            username = answer.user.username_telegram
-        elif answer.user and hasattr(answer.user, "id"):
-            username = (
-                f"User_{str(answer.user.id)[:8]}"  # Shorten user ID if used as fallback
-            )
-
-        # Ensure score and time_taken_seconds are not None
-        score = answer.score if answer.score is not None else 0
-        time_taken = (
-            answer.time_taken_seconds
-            if answer.time_taken_seconds is not None
-            else float("inf")
-        )
-
+    for idx, stats in enumerate(participant_stats, start=1):
         ranked_participants.append(
             {
-                "rank": i + 1,
-                "user_id": answer.user_id,
-                "username": username,
-                "score": score,
-                "time_taken": time_taken,
+                "rank": idx,
+                "user_id": stats["user_id"],
+                "username": stats.get("username", "UnknownUser"),
+                "score": stats.get("correct_count", 0),
+                "time_taken": None,
                 "is_winner": False,
             }
         )

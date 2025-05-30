@@ -8,16 +8,11 @@ from sqlalchemy import (
     Boolean,
     ForeignKey,
 )
-from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 import enum
 import uuid
 import datetime
-from .user import (
-    User,
-)  # Ensure User is imported for type hinting if needed, but relationship uses string
-
-Base = declarative_base()
+from .user import Base, User
 
 
 class QuizStatus(enum.Enum):
@@ -87,8 +82,8 @@ class QuizAnswer(Base):
 
     quiz = relationship("Quiz", back_populates="answers")  # Add relationship
     user = relationship(
-        "User", back_populates="quiz_answers"
-    )  # Changed to use "User" directly
+        User, back_populates="quiz_answers"
+    )  # Changed from string to direct class reference
 
     # Quick helper to compute rank based on correct answers and speed
     @staticmethod
