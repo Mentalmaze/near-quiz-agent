@@ -390,7 +390,9 @@ async def save_quiz_reward_details(
         session.close()
 
 
-async def save_quiz_payment_hash(quiz_id: str, payment_hash: str, application: Optional["Application"]) -> bool:
+async def save_quiz_payment_hash(
+    quiz_id: str, payment_hash: str, application: Optional["Application"]
+) -> bool:
     """Saves the payment transaction hash for a quiz and updates its status."""
     session = SessionLocal()
     redis_client = RedisClient()
@@ -454,9 +456,16 @@ async def save_quiz_payment_hash(quiz_id: str, payment_hash: str, application: O
         await redis_client.close()
         return True
     except AttributeError as ae:
-        logger.error(f"AttributeError in save_quiz_payment_hash for quiz {quiz_id}: {ae}", exc_info=True)
-        if "JobQueue" in str(ae) and "get_instance" in str(ae): # This specific check might become obsolete
-            logger.error("This looks like the JobQueue.get_instance() error. Ensure 'application' is correctly passed and used for job_queue.")
+        logger.error(
+            f"AttributeError in save_quiz_payment_hash for quiz {quiz_id}: {ae}",
+            exc_info=True,
+        )
+        if "JobQueue" in str(ae) and "get_instance" in str(
+            ae
+        ):  # This specific check might become obsolete
+            logger.error(
+                "This looks like the JobQueue.get_instance() error. Ensure 'application' is correctly passed and used for job_queue."
+            )
         session.rollback()
         await redis_client.close()
         return False
@@ -502,21 +511,28 @@ async def get_quiz_details(quiz_id: str) -> Optional[dict]:
                 "end_time": quiz.end_time.isoformat() if quiz.end_time else None,
                 "winners_announced": quiz.winners_announced,
                 "created_at": quiz.created_at.isoformat() if quiz.created_at else None,
-                "activated_at": quiz.activated_at.isoformat() if hasattr(quiz, 'activated_at') and quiz.activated_at else None,
-                "duration_seconds": quiz.duration_seconds if hasattr(quiz, 'duration_seconds') else None
+                "activated_at": (
+                    quiz.activated_at.isoformat()
+                    if hasattr(quiz, "activated_at") and quiz.activated_at
+                    else None
+                ),
+                "duration_seconds": (
+                    quiz.duration_seconds if hasattr(quiz, "duration_seconds") else None
+                ),
             }
             # Cache for 1 hour, or less if quiz is active and ending soon
             cache_duration = 3600
             if quiz.status == QuizStatus.ACTIVE and quiz.end_time:
                 end_time_aware = quiz.end_time
                 # If quiz.end_time is naive, assume it's UTC and make it aware.
-                if end_time_aware.tzinfo is None or end_time_aware.tzinfo.utcoffset(end_time_aware) is None:
+                if (
+                    end_time_aware.tzinfo is None
+                    or end_time_aware.tzinfo.utcoffset(end_time_aware) is None
+                ):
                     end_time_aware = end_time_aware.replace(tzinfo=timezone.utc)
 
                 current_time_aware = datetime.now(timezone.utc)
-                seconds_to_end = (
-                    end_time_aware - current_time_aware
-                ).total_seconds()
+                seconds_to_end = (end_time_aware - current_time_aware).total_seconds()
                 # Cache for a shorter duration if ending soon, but not too short (min 5 mins)
                 cache_duration = (
                     max(300, min(int(seconds_to_end), 3600))
@@ -729,7 +745,7 @@ async def send_quiz_question(bot, user_id, quiz, question_index):
         await safe_send_message(
             bot,
             user_id,
-            f"You've tackled all {len(questions_list)} questions in the '{quiz.topic}' quiz! Your answers are saved. Eager to see the results? Use `/winners {quiz.id}`."
+            f"You've tackled all {len(questions_list)} questions in the '{quiz.topic}' quiz! Your answers are saved. Eager to see the results? Use `/winners {quiz.id}`.",
         )
         return
 
@@ -1303,7 +1319,9 @@ async def distribute_quiz_rewards(update: Update, context: CallbackContext):
             pass
 
 
-async def schedule_auto_distribution(application: "Application", quiz_id: str, delay_seconds: float):
+async def schedule_auto_distribution(
+    application: "Application", quiz_id: str, delay_seconds: float
+):
     """Schedules the automatic distribution of rewards for a quiz after a delay using application.job_queue."""
     logger.info(
         f"schedule_auto_distribution called for quiz_id: {quiz_id} with delay: {delay_seconds}"
@@ -1330,15 +1348,20 @@ async def schedule_auto_distribution(application: "Application", quiz_id: str, d
             if quiz and quiz.status == QuizStatus.ACTIVE and not quiz.winners_announced:
                 logger.info(f"Quiz {quiz_id} is ACTIVE. Proceeding with distribution.")
                 # Pass the application instance to distribute_quiz_rewards
-                await distribute_quiz_rewards(application, quiz_id) 
+                await distribute_quiz_rewards(application, quiz_id)
             elif quiz:
-                logger.info(f"Auto-distribution for quiz {quiz_id} skipped. Status: {quiz.status}, WA: {quiz.winners_announced}")
+                logger.info(
+                    f"Auto-distribution for quiz {quiz_id} skipped. Status: {quiz.status}, WA: {quiz.winners_announced}"
+                )
             else:
                 logger.warning(f"Quiz {quiz_id} not found for auto-distribution job.")
         except Exception as e:
-            logger.error(f"Error during auto-distribution job for quiz {quiz_id}: {e}", exc_info=True)
+            logger.error(
+                f"Error during auto-distribution job for quiz {quiz_id}: {e}",
+                exc_info=True,
+            )
         finally:
-            if 'session' in locals() and session:
+            if "session" in locals() and session:
                 session.close()
 
     # Wrapper to be called by job_queue.run_once
@@ -1346,8 +1369,10 @@ async def schedule_auto_distribution(application: "Application", quiz_id: str, d
         asyncio.create_task(job_callback(context))
 
     if delay_seconds > 0:
-        if hasattr(application, 'job_queue') and application.job_queue:
-            application.job_queue.run_once(job_wrapper, delay_seconds, name=f"distribute_{quiz_id}", job_kwargs={})
+        if hasattr(application, "job_queue") and application.job_queue:
+            application.job_queue.run_once(
+                job_wrapper, delay_seconds, name=f"distribute_{quiz_id}", job_kwargs={}
+            )
             logger.info(
                 f"Scheduled auto-distribution job for quiz {quiz_id} in {delay_seconds} seconds via application.job_queue."
             )
@@ -1356,10 +1381,14 @@ async def schedule_auto_distribution(application: "Application", quiz_id: str, d
                 f"application.job_queue not available for quiz {quiz_id}. Auto-distribution will not be scheduled."
             )
     else:
-        logger.info(f"Delay for quiz {quiz_id} is not positive ({delay_seconds}s). Running job immediately (or rather, scheduling for immediate execution).")
+        logger.info(
+            f"Delay for quiz {quiz_id} is not positive ({delay_seconds}s). Running job immediately (or rather, scheduling for immediate execution)."
+        )
         # Run immediately if delay is not positive, still using the job queue for consistency if possible
-        if hasattr(application, 'job_queue') and application.job_queue:
-            application.job_queue.run_once(job_wrapper, 0, name=f"distribute_{quiz_id}_immediate", job_kwargs={})
+        if hasattr(application, "job_queue") and application.job_queue:
+            application.job_queue.run_once(
+                job_wrapper, 0, name=f"distribute_{quiz_id}_immediate", job_kwargs={}
+            )
         else:
             # Fallback if job_queue is not available for immediate execution either
             logger.error(
@@ -1491,3 +1520,159 @@ def parse_questions(raw_questions):
             print("Defaulting to A as correct answer")
 
     return result
+
+import logging # Ensure logging is imported if not already
+from sqlalchemy.orm import joinedload, selectinload
+from models.user import User # Assuming User model is in models.user
+from models.quiz import Quiz, QuizAnswer, QuizStatus # Ensure QuizStatus is imported
+from typing import Dict, List, Any # Ensure these are imported
+
+def parse_reward_schedule_to_description(reward_schedule: Dict) -> str:
+    """Helper function to convert reward_schedule JSON to a human-readable string."""
+    if not reward_schedule or not isinstance(reward_schedule, dict):
+        return "Not specified"
+    
+    reward_type = reward_schedule.get("type", "custom")
+    details_text = reward_schedule.get("details_text", "")
+
+    if details_text: # Prefer details_text if available
+        return details_text
+
+    if reward_type == "wta_amount": # Matching the type used in reward setup
+        return "Winner Takes All"
+    elif reward_type == "top3_details": # Matching the type used in reward setup
+        return "Top 3 Winners"
+    elif reward_type == "custom_details": # Matching the type used in reward setup
+        return "Custom Rewards"
+    elif reward_type == "manual_free_text": # Matching the type used in reward setup
+        return "Manually Described Rewards"
+    # Fallback for older or other types
+    elif reward_type == "wta":
+        return "Winner Takes All"
+    elif reward_type == "top_n":
+        n = reward_schedule.get("n", "N")
+        return f"Top {n} Winners"
+    elif reward_type == "shared_pot":
+        return "Shared Pot for Top Scorers"
+    return "Custom Reward Structure"
+
+
+async def _generate_leaderboard_data_for_quiz(quiz: Quiz, session) -> Optional[Dict[str, Any]]:
+    """
+    Generates leaderboard data for a single quiz.
+    Fetches answers, users, ranks them, and determines winners.
+    """
+    logger.info(f"Generating leaderboard data for quiz ID: {quiz.id} ('{quiz.topic}')")
+
+    # Eager load user details. Ensure QuizAnswer has a 'user' relationship to the User model.
+    # Also, ensure QuizAnswer has 'score' and 'time_taken_seconds' attributes.
+    quiz_answers = (
+        session.query(QuizAnswer)
+        .filter(QuizAnswer.quiz_id == quiz.id)
+        .options(selectinload(QuizAnswer.user)) # Switched to selectinload for potentially better performance with many answers
+        .order_by(QuizAnswer.score.desc(), QuizAnswer.time_taken_seconds.asc())
+        .all()
+    )
+
+    if not quiz_answers:
+        logger.info(f"No answers found for quiz ID: {quiz.id}.")
+        return {
+            "quiz_id": quiz.id,
+            "quiz_topic": quiz.topic,
+            "reward_description": parse_reward_schedule_to_description(quiz.reward_schedule),
+            "participants": [],
+            "status": quiz.status.value if quiz.status else 'UNKNOWN'
+        }
+
+    ranked_participants = []
+    for i, answer in enumerate(quiz_answers):
+        username = "UnknownUser"
+        if answer.user and hasattr(answer.user, 'username_telegram') and answer.user.username_telegram:
+            username = answer.user.username_telegram
+        elif answer.user and hasattr(answer.user, 'id'):
+            username = f"User_{str(answer.user.id)[:8]}" # Shorten user ID if used as fallback
+
+        # Ensure score and time_taken_seconds are not None
+        score = answer.score if answer.score is not None else 0
+        time_taken = answer.time_taken_seconds if answer.time_taken_seconds is not None else float('inf')
+
+
+        ranked_participants.append({
+            "rank": i + 1,
+            "user_id": answer.user_id,
+            "username": username,
+            "score": score,
+            "time_taken": time_taken,
+            "is_winner": False 
+        })
+
+    reward_schedule = quiz.reward_schedule or {}
+    reward_type = reward_schedule.get("type", "unknown")
+    
+    # Refined Winner Logic
+    if reward_type in ["wta_amount", "wta"]: # Winner Takes All
+        if ranked_participants and ranked_participants[0]["score"] > 0:
+            ranked_participants[0]["is_winner"] = True
+    elif reward_type in ["top3_details", "top_n"]:
+        num_to_win = 3 # Default for top3_details
+        if reward_type == "top_n":
+            num_to_win = reward_schedule.get("n", 0)
+        
+        winners_count = 0
+        for p in ranked_participants:
+            if winners_count < num_to_win and p["score"] > 0:
+                p["is_winner"] = True
+                winners_count += 1
+            else:
+                break # Stop if we have enough winners or scores are 0
+    # Add more sophisticated logic for "custom_details", "manual_free_text", "shared_pot" if needed
+    # For "custom_details" and "manual_free_text", winner determination might be manual or based on text parsing,
+    # which is complex. For now, they won't automatically mark winners here.
+
+    logger.info(f"Generated leaderboard for quiz {quiz.id} with {len(ranked_participants)} participants.")
+    return {
+        "quiz_id": quiz.id,
+        "quiz_topic": quiz.topic,
+        "reward_description": parse_reward_schedule_to_description(reward_schedule),
+        "participants": ranked_participants,
+        "status": quiz.status.value if quiz.status else 'UNKNOWN'
+    }
+
+
+async def get_leaderboards_for_all_active_quizzes() -> List[Dict[str, Any]]:
+    """
+    Fetches and generates leaderboard data for all quizzes with status 'ACTIVE'.
+    """
+    logger.info("Fetching leaderboards for all active quizzes.")
+    all_active_leaderboards = []
+    session = SessionLocal()
+    try:
+        # Eager load questions_relationship if it's used by _generate_leaderboard_data_for_quiz
+        # or if quiz.questions is accessed directly.
+        # Also eager load reward_schedule if it's a relationship, otherwise it's fine.
+        active_quizzes = (
+            session.query(Quiz)
+            .filter(Quiz.status == QuizStatus.ACTIVE)
+            # .options(selectinload(Quiz.questions_relationship)) # Example if questions were a relationship
+            .all()
+        )
+
+        if not active_quizzes:
+            logger.info("No active quizzes found.")
+            return []
+
+        logger.info(f"Found {len(active_quizzes)} active quizzes.")
+        for quiz_obj in active_quizzes: # Renamed to avoid conflict with 'quiz' module
+            # Pass the quiz_obj (SQLAlchemy model instance) and session
+            leaderboard_data = await _generate_leaderboard_data_for_quiz(quiz_obj, session)
+            if leaderboard_data: # Always add, even if no participants, to show it's active
+                all_active_leaderboards.append(leaderboard_data)
+
+    except Exception as e:
+        logger.error(f"Error fetching active quiz leaderboards: {e}", exc_info=True)
+        return [] 
+    finally:
+        session.close()
+    
+    logger.info(f"Returning {len(all_active_leaderboards)} active leaderboards.")
+    return all_active_leaderboards
