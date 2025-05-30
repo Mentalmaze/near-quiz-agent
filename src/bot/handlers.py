@@ -1057,7 +1057,7 @@ async def show_all_active_leaderboards_command(
     """Displays leaderboards for all active quizzes in a more user-friendly format."""
     session = SessionLocal()
     try:
-        active_quizzes = get_leaderboards_for_all_active_quizzes()
+        active_quizzes = await get_leaderboards_for_all_active_quizzes()
 
         if not active_quizzes:
             await safe_send_message(
