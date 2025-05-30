@@ -17,7 +17,7 @@ from services.quiz_service import (
     schedule_auto_distribution,
     save_quiz_payment_hash,  # Added import
     save_quiz_reward_details,  # Added import
-    get_leaderboards_for_all_active_quizzes, # Add this import
+    get_leaderboards_for_all_active_quizzes,  # Add this import
 )
 from services.user_service import (
     get_user_wallet,
@@ -35,7 +35,7 @@ from utils.config import Config  # Added to access DEPOSIT_ADDRESS
 from store.database import SessionLocal
 from models.quiz import Quiz
 from utils.redis_client import RedisClient  # Added RedisClient import
-from utils.telegram_helpers import safe_send_message # Ensure this is imported
+from utils.telegram_helpers import safe_send_message  # Ensure this is imported
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -1017,7 +1017,9 @@ async def distribute_rewards_handler(update: Update, context: CallbackContext):
     await distribute_quiz_rewards(update, context)
 
 
-async def show_all_active_leaderboards_command(update: Update, context: CallbackContext):
+async def show_all_active_leaderboards_command(
+    update: Update, context: CallbackContext
+):
     """Shows leaderboards for all currently active quizzes."""
     user = update.effective_user
     if not user:
@@ -1026,12 +1028,14 @@ async def show_all_active_leaderboards_command(update: Update, context: Callback
         if update.message:
             await update.message.reply_text("Could not identify user.")
         return
-        
+
     logger.info(f"User {user.id} requested active leaderboards.")
-    
+
     # Acknowledge command immediately
     try:
-        await update.message.reply_text("⏳ Fetching live leaderboards, please wait a moment...")
+        await update.message.reply_text(
+            "⏳ Fetching live leaderboards, please wait a moment..."
+        )
     except Exception as e:
         logger.error(f"Error sending initial wait message: {e}")
         # Proceed anyway, but log the issue
@@ -1043,51 +1047,69 @@ async def show_all_active_leaderboards_command(update: Update, context: Callback
             await safe_send_message(
                 context.bot,
                 update.effective_chat.id,
-                "✨ No quizzes are currently active, or no one has played them yet!"
+                "✨ No quizzes are currently active, or no one has played them yet!",
             )
             return
 
         num_leaderboards_sent = 0
         for leaderboard_data in list_of_leaderboards:
             quiz_topic = leaderboard_data.get("quiz_topic", "N/A")
-            reward_description = leaderboard_data.get("reward_description", "Not specified")
+            reward_description = leaderboard_data.get(
+                "reward_description", "Not specified"
+            )
             participants = leaderboard_data.get("participants", [])
-            quiz_id_short = leaderboard_data.get("quiz_id", "N/A")[:8] # Short ID for display
-            
+            quiz_id_short = leaderboard_data.get("quiz_id", "N/A")[
+                :8
+            ]  # Short ID for display
+
             message_parts = [
-                f"🏆 <b>Quiz: \"{_escape_markdown_v2_specials(quiz_topic)}\"</b> (ID: {quiz_id_short}) - Live!",
-                f"🏅 Reward: {_escape_markdown_v2_specials(reward_description)}\n"
+                f'🏆 <b>Quiz: "{_escape_markdown_v2_specials(quiz_topic)}"</b> (ID: {quiz_id_short}) - Live!',
+                f"🏅 Reward: {_escape_markdown_v2_specials(reward_description)}\n",
             ]
 
             if not participants:
-                message_parts.append("<i>No one has played this quiz yet. Be the first!</i> `/playquiz {leaderboard_data.get('quiz_id', '')}`")
+                message_parts.append(
+                    "<i>No one has played this quiz yet. Be the first!</i> `/playquiz {leaderboard_data.get('quiz_id', '')}`"
+                )
             else:
                 message_parts.append("<b>Leaderboard:</b>")
                 for p_idx, p in enumerate(participants):
-                    if p_idx >= 10 and len(participants) > 12: # Limit display if too many, show top 10 and "..."
-                        message_parts.append(f"<i>... and {len(participants) - p_idx} more participants.</i>")
+                    if (
+                        p_idx >= 10 and len(participants) > 12
+                    ):  # Limit display if too many, show top 10 and "..."
+                        message_parts.append(
+                            f"<i>... and {len(participants) - p_idx} more participants.</i>"
+                        )
                         break
-                    
-                    rank = p.get('rank', '-')
-                    username = _escape_markdown_v2_specials(p.get('username', 'Unknown'))
-                    score = p.get('score', 0)
-                    time_taken_seconds = p.get('time_taken') 
-                    is_winner_char = "👑 " if p.get('is_winner', False) else ""
-                    
+
+                    rank = p.get("rank", "-")
+                    username = _escape_markdown_v2_specials(
+                        p.get("username", "Unknown")
+                    )
+                    score = p.get("score", 0)
+                    time_taken_seconds = p.get("time_taken")
+                    is_winner_char = "👑 " if p.get("is_winner", False) else ""
+
                     time_str = "-"
-                    if isinstance(time_taken_seconds, (int, float)) and time_taken_seconds != float('inf') and time_taken_seconds >= 0:
+                    if (
+                        isinstance(time_taken_seconds, (int, float))
+                        and time_taken_seconds != float("inf")
+                        and time_taken_seconds >= 0
+                    ):
                         # Simple seconds formatting, can be expanded (e.g., to M:SS)
                         time_str = f"{time_taken_seconds:.2f}s"
-                    
+
                     message_parts.append(
                         f"{is_winner_char}{rank}. @{username} - Score: {score}, Time: {time_str}"
                     )
-            
-            message_parts.append(f"\n➡️ Play this quiz: `/playquiz {leaderboard_data.get('quiz_id', '')}`")
+
+            message_parts.append(
+                f"\n➡️ Play this quiz: `/playquiz {leaderboard_data.get('quiz_id', '')}`"
+            )
             message_parts.append("--------------------")
-            
-            full_message = "\\n".join(message_parts) # Use \\n for MarkdownV2 newlines
-            
+
+            full_message = "\\n".join(message_parts)  # Use \\n for MarkdownV2 newlines
+
             # Using MarkdownV2, ensure _escape_markdown_v2_specials is robust
             # or switch to HTML if complex formatting is easier.
             # For now, sticking to MarkdownV2 as per previous _escape_markdown_v2_specials usage.
@@ -1096,16 +1118,20 @@ async def show_all_active_leaderboards_command(update: Update, context: Callback
                 context.bot,
                 update.effective_chat.id,
                 text=full_message,
-                parse_mode="MarkdownV2" 
+                parse_mode="MarkdownV2",
             )
-            num_leaderboards_sent +=1
-            if num_leaderboards_sent < len(list_of_leaderboards): # Avoid sleep after last message
-                 await asyncio.sleep(0.75) # Slightly increased delay
+            num_leaderboards_sent += 1
+            if num_leaderboards_sent < len(
+                list_of_leaderboards
+            ):  # Avoid sleep after last message
+                await asyncio.sleep(0.75)  # Slightly increased delay
 
     except Exception as e:
-        logger.error(f"Error in show_all_active_leaderboards_command: {e}", exc_info=True)
+        logger.error(
+            f"Error in show_all_active_leaderboards_command: {e}", exc_info=True
+        )
         await safe_send_message(
             context.bot,
             update.effective_chat.id,
-            "⚠️ An error occurred while fetching leaderboards. Please try again later."
+            "⚠️ An error occurred while fetching leaderboards. Please try again later.",
         )

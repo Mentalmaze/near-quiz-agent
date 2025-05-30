@@ -1,6 +1,6 @@
 from sqlalchemy import Column, String, DateTime
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import relationship # Import relationship
+from sqlalchemy.orm import relationship  # Import relationship
 import datetime
 
 Base = declarative_base()
@@ -12,4 +12,4 @@ class User(Base):
     wallet_address = Column(String, nullable=True, index=True)  # Added index
     linked_at = Column(DateTime, default=datetime.datetime.utcnow)
 
-    quiz_answers = relationship("QuizAnswer", back_populates="user") # Add relationship
+    quiz_answers = relationship("QuizAnswer", back_populates="user")  # Add relationship

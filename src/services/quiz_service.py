@@ -1521,30 +1521,32 @@ def parse_questions(raw_questions):
 
     return result
 
-import logging # Ensure logging is imported if not already
+
+import logging  # Ensure logging is imported if not already
 from sqlalchemy.orm import joinedload, selectinload
-from models.user import User # Assuming User model is in models.user
-from models.quiz import Quiz, QuizAnswer, QuizStatus # Ensure QuizStatus is imported
-from typing import Dict, List, Any # Ensure these are imported
+from models.user import User  # Assuming User model is in models.user
+from models.quiz import Quiz, QuizAnswer, QuizStatus  # Ensure QuizStatus is imported
+from typing import Dict, List, Any  # Ensure these are imported
+
 
 def parse_reward_schedule_to_description(reward_schedule: Dict) -> str:
     """Helper function to convert reward_schedule JSON to a human-readable string."""
     if not reward_schedule or not isinstance(reward_schedule, dict):
         return "Not specified"
-    
+
     reward_type = reward_schedule.get("type", "custom")
     details_text = reward_schedule.get("details_text", "")
 
-    if details_text: # Prefer details_text if available
+    if details_text:  # Prefer details_text if available
         return details_text
 
-    if reward_type == "wta_amount": # Matching the type used in reward setup
+    if reward_type == "wta_amount":  # Matching the type used in reward setup
         return "Winner Takes All"
-    elif reward_type == "top3_details": # Matching the type used in reward setup
+    elif reward_type == "top3_details":  # Matching the type used in reward setup
         return "Top 3 Winners"
-    elif reward_type == "custom_details": # Matching the type used in reward setup
+    elif reward_type == "custom_details":  # Matching the type used in reward setup
         return "Custom Rewards"
-    elif reward_type == "manual_free_text": # Matching the type used in reward setup
+    elif reward_type == "manual_free_text":  # Matching the type used in reward setup
         return "Manually Described Rewards"
     # Fallback for older or other types
     elif reward_type == "wta":
@@ -1557,7 +1559,9 @@ def parse_reward_schedule_to_description(reward_schedule: Dict) -> str:
     return "Custom Reward Structure"
 
 
-async def _generate_leaderboard_data_for_quiz(quiz: Quiz, session) -> Optional[Dict[str, Any]]:
+async def _generate_leaderboard_data_for_quiz(
+    quiz: Quiz, session
+) -> Optional[Dict[str, Any]]:
     """
     Generates leaderboard data for a single quiz.
     Fetches answers, users, ranks them, and determines winners.
@@ -1569,7 +1573,9 @@ async def _generate_leaderboard_data_for_quiz(quiz: Quiz, session) -> Optional[D
     quiz_answers = (
         session.query(QuizAnswer)
         .filter(QuizAnswer.quiz_id == quiz.id)
-        .options(selectinload(QuizAnswer.user)) # Switched to selectinload for potentially better performance with many answers
+        .options(
+            selectinload(QuizAnswer.user)
+        )  # Switched to selectinload for potentially better performance with many answers
         .order_by(QuizAnswer.score.desc(), QuizAnswer.time_taken_seconds.asc())
         .all()
     )
@@ -1579,63 +1585,78 @@ async def _generate_leaderboard_data_for_quiz(quiz: Quiz, session) -> Optional[D
         return {
             "quiz_id": quiz.id,
             "quiz_topic": quiz.topic,
-            "reward_description": parse_reward_schedule_to_description(quiz.reward_schedule),
+            "reward_description": parse_reward_schedule_to_description(
+                quiz.reward_schedule
+            ),
             "participants": [],
-            "status": quiz.status.value if quiz.status else 'UNKNOWN'
+            "status": quiz.status.value if quiz.status else "UNKNOWN",
         }
 
     ranked_participants = []
     for i, answer in enumerate(quiz_answers):
         username = "UnknownUser"
-        if answer.user and hasattr(answer.user, 'username_telegram') and answer.user.username_telegram:
+        if (
+            answer.user
+            and hasattr(answer.user, "username_telegram")
+            and answer.user.username_telegram
+        ):
             username = answer.user.username_telegram
-        elif answer.user and hasattr(answer.user, 'id'):
-            username = f"User_{str(answer.user.id)[:8]}" # Shorten user ID if used as fallback
+        elif answer.user and hasattr(answer.user, "id"):
+            username = (
+                f"User_{str(answer.user.id)[:8]}"  # Shorten user ID if used as fallback
+            )
 
         # Ensure score and time_taken_seconds are not None
         score = answer.score if answer.score is not None else 0
-        time_taken = answer.time_taken_seconds if answer.time_taken_seconds is not None else float('inf')
+        time_taken = (
+            answer.time_taken_seconds
+            if answer.time_taken_seconds is not None
+            else float("inf")
+        )
 
-
-        ranked_participants.append({
-            "rank": i + 1,
-            "user_id": answer.user_id,
-            "username": username,
-            "score": score,
-            "time_taken": time_taken,
-            "is_winner": False 
-        })
+        ranked_participants.append(
+            {
+                "rank": i + 1,
+                "user_id": answer.user_id,
+                "username": username,
+                "score": score,
+                "time_taken": time_taken,
+                "is_winner": False,
+            }
+        )
 
     reward_schedule = quiz.reward_schedule or {}
     reward_type = reward_schedule.get("type", "unknown")
-    
+
     # Refined Winner Logic
-    if reward_type in ["wta_amount", "wta"]: # Winner Takes All
+    if reward_type in ["wta_amount", "wta"]:  # Winner Takes All
         if ranked_participants and ranked_participants[0]["score"] > 0:
             ranked_participants[0]["is_winner"] = True
     elif reward_type in ["top3_details", "top_n"]:
-        num_to_win = 3 # Default for top3_details
+        num_to_win = 3  # Default for top3_details
         if reward_type == "top_n":
             num_to_win = reward_schedule.get("n", 0)
-        
+
         winners_count = 0
         for p in ranked_participants:
             if winners_count < num_to_win and p["score"] > 0:
                 p["is_winner"] = True
                 winners_count += 1
             else:
-                break # Stop if we have enough winners or scores are 0
+                break  # Stop if we have enough winners or scores are 0
     # Add more sophisticated logic for "custom_details", "manual_free_text", "shared_pot" if needed
     # For "custom_details" and "manual_free_text", winner determination might be manual or based on text parsing,
     # which is complex. For now, they won't automatically mark winners here.
 
-    logger.info(f"Generated leaderboard for quiz {quiz.id} with {len(ranked_participants)} participants.")
+    logger.info(
+        f"Generated leaderboard for quiz {quiz.id} with {len(ranked_participants)} participants."
+    )
     return {
         "quiz_id": quiz.id,
         "quiz_topic": quiz.topic,
         "reward_description": parse_reward_schedule_to_description(reward_schedule),
         "participants": ranked_participants,
-        "status": quiz.status.value if quiz.status else 'UNKNOWN'
+        "status": quiz.status.value if quiz.status else "UNKNOWN",
     }
 
 
@@ -1651,8 +1672,7 @@ async def get_leaderboards_for_all_active_quizzes() -> List[Dict[str, Any]]:
         # or if quiz.questions is accessed directly.
         # Also eager load reward_schedule if it's a relationship, otherwise it's fine.
         active_quizzes = (
-            session.query(Quiz)
-            .filter(Quiz.status == QuizStatus.ACTIVE)
+            session.query(Quiz).filter(Quiz.status == QuizStatus.ACTIVE)
             # .options(selectinload(Quiz.questions_relationship)) # Example if questions were a relationship
             .all()
         )
@@ -1662,17 +1682,21 @@ async def get_leaderboards_for_all_active_quizzes() -> List[Dict[str, Any]]:
             return []
 
         logger.info(f"Found {len(active_quizzes)} active quizzes.")
-        for quiz_obj in active_quizzes: # Renamed to avoid conflict with 'quiz' module
+        for quiz_obj in active_quizzes:  # Renamed to avoid conflict with 'quiz' module
             # Pass the quiz_obj (SQLAlchemy model instance) and session
-            leaderboard_data = await _generate_leaderboard_data_for_quiz(quiz_obj, session)
-            if leaderboard_data: # Always add, even if no participants, to show it's active
+            leaderboard_data = await _generate_leaderboard_data_for_quiz(
+                quiz_obj, session
+            )
+            if (
+                leaderboard_data
+            ):  # Always add, even if no participants, to show it's active
                 all_active_leaderboards.append(leaderboard_data)
 
     except Exception as e:
         logger.error(f"Error fetching active quiz leaderboards: {e}", exc_info=True)
-        return [] 
+        return []
     finally:
         session.close()
-    
+
     logger.info(f"Returning {len(all_active_leaderboards)} active leaderboards.")
     return all_active_leaderboards

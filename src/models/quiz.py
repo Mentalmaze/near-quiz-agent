@@ -1,9 +1,21 @@
-from sqlalchemy import Column, String, Enum, JSON, DateTime, BigInteger, Boolean, ForeignKey
+from sqlalchemy import (
+    Column,
+    String,
+    Enum,
+    JSON,
+    DateTime,
+    BigInteger,
+    Boolean,
+    ForeignKey,
+)
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 import enum
 import uuid
 import datetime
+from .user import (
+    User,
+)  # Ensure User is imported for type hinting if needed, but relationship uses string
 
 Base = declarative_base()
 
@@ -57,8 +69,12 @@ class QuizAnswer(Base):
 
     __tablename__ = "quiz_answers"
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    quiz_id = Column(String, ForeignKey("quizzes.id"), nullable=False, index=True)  # Add ForeignKey
-    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)  # Add ForeignKey
+    quiz_id = Column(
+        String, ForeignKey("quizzes.id"), nullable=False, index=True
+    )  # Add ForeignKey
+    user_id = Column(
+        String, ForeignKey("users.id"), nullable=False, index=True
+    )  # Add ForeignKey
     username = Column(String, nullable=True)  # For displaying winners
     answer = Column(String, nullable=False)  # User's selected answer (e.g., "A", "B")
     is_correct = Column(
@@ -70,7 +86,9 @@ class QuizAnswer(Base):
     answered_at = Column(DateTime, default=datetime.datetime.utcnow)
 
     quiz = relationship("Quiz", back_populates="answers")  # Add relationship
-    user = relationship("User")  # Add relationship to User
+    user = relationship(
+        "User", back_populates="quiz_answers"
+    )  # Changed to use "User" directly
 
     # Quick helper to compute rank based on correct answers and speed
     @staticmethod

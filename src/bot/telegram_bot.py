@@ -117,6 +117,7 @@ class TelegramBot:
             distribute_rewards_handler,
             start_reward_setup_callback,  # Import new reward setup handlers
             handle_reward_method_choice,
+            show_all_active_leaderboards_command,
         )
 
         # Conversation for interactive quiz creation needs to be registered FIRST
@@ -208,6 +209,10 @@ class TelegramBot:
         )  # Register the new handler
         self.app.add_handler(CommandHandler("playquiz", play_quiz_handler))
         self.app.add_handler(CommandHandler("winners", winners_handler))
+        self.app.add_handler(
+            CommandHandler("leaderboards", show_all_active_leaderboards_command)
+        )
+
         # self.app.add_handler(
         #     CommandHandler("distributerewards", distribute_rewards_handler)
         # )

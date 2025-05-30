@@ -16,8 +16,6 @@ from utils.config import Config
 from bot.telegram_bot import TelegramBot
 from store.database import init_db, migrate_schema
 from utils.redis_client import RedisClient  # Added import
-from telegram.ext import CommandHandler, Application  # Ensure Application is imported if not already
-from bot.handlers import show_all_active_leaderboards_command  # Make sure this import is correct
 
 logger = logging.getLogger(__name__)
 
@@ -30,9 +28,9 @@ async def main():
     global bot_instance
 
     # # Try to migrate schema if using PostgreSQL
-    # if "postgresql" in Config.DATABASE_URL or "postgres" in Config.DATABASE_URL:
-    #     logger.info("Attempting to migrate database schema for PostgreSQL...")
-    # migrate_schema()
+    if "postgresql" in Config.DATABASE_URL or "postgres" in Config.DATABASE_URL:
+        #     logger.info("Attempting to migrate database schema for PostgreSQL...")
+        migrate_schema()
 
     # Initialize database tables if they don't exist
     # init_db()
@@ -56,13 +54,6 @@ async def main():
         )
         # Depending on the application's requirements, you might want to sys.exit(1) here
         # if Redis is critical for operation.
-
-    # Create the Application instance
-    application = Application.builder().token(Config.TELEGRAM_TOKEN).build()
-
-    # Register the new command handler
-    application.add_handler(CommandHandler("leaderboards", show_all_active_leaderboards_command))
-
     # Start telegram bot
     # Check if WEBHOOK_URL is defined and not empty in Config
     if hasattr(Config, "WEBHOOK_URL") and Config.WEBHOOK_URL:
@@ -95,15 +86,14 @@ async def main():
             webhook_listen_ip=webhook_listen_ip,  # IP address to listen on (e.g., 0.0.0.0)
             webhook_port=webhook_port,  # Port to listen on (e.g., 8443)
             webhook_url_path=webhook_url_path,  # Path for the webhook (e.g., /your-bot-token)
-            application=application # Pass application here
         )
     else:
         logger.info(
             "Initializing bot with polling (WEBHOOK_URL not configured or empty)."
         )
-        bot_instance = TelegramBot(token=Config.TELEGRAM_TOKEN, application=application) # Pass application here
+        bot_instance = TelegramBot(token=Config.TELEGRAM_TOKEN)
 
-    bot_instance.register_handlers() # This might need to be adjusted if handlers are registered on the application directly
+    bot_instance.register_handlers()
     await bot_instance.start()  # This method in TelegramBot should handle either polling or webhook start
 
 
