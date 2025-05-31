@@ -1695,6 +1695,8 @@ async def _generate_leaderboard_data_for_quiz(
             ),
             "participants": [],
             "status": quiz.status.value if quiz.status else "UNKNOWN",
+            # Include end_time for leaderboard display
+            "end_time": quiz.end_time.isoformat() if quiz.end_time else None,
         }
 
     ranked_participants = []
@@ -1742,6 +1744,8 @@ async def _generate_leaderboard_data_for_quiz(
         "reward_description": parse_reward_schedule_to_description(reward_schedule),
         "participants": ranked_participants,
         "status": quiz.status.value if quiz.status else "UNKNOWN",
+        # Include end_time for leaderboard display
+        "end_time": quiz.end_time.isoformat() if quiz.end_time else None,
     }
 
 
@@ -1753,12 +1757,13 @@ async def get_leaderboards_for_all_active_quizzes() -> List[Dict[str, Any]]:
     all_active_leaderboards = []
     session = SessionLocal()
     try:
-        # Eager load questions_relationship if it's used by _generate_leaderboard_data_for_quiz
-        # or if quiz.questions is accessed directly.
-        # Also eager load reward_schedule if it's a relationship, otherwise it's fine.
+        now = datetime.now(timezone.utc)
         active_quizzes = (
-            session.query(Quiz).filter(Quiz.status == QuizStatus.ACTIVE)
-            # .options(selectinload(Quiz.questions_relationship)) # Example if questions were a relationship
+            session.query(Quiz)
+            .filter(
+                Quiz.status == QuizStatus.ACTIVE,
+                ((Quiz.end_time == None) | (Quiz.end_time > now)),
+            )
             .all()
         )
 

@@ -28,9 +28,9 @@ async def main():
     global bot_instance
 
     # # Try to migrate schema if using PostgreSQL
-    if "postgresql" in Config.DATABASE_URL or "postgres" in Config.DATABASE_URL:
+    # if "postgresql" in Config.DATABASE_URL or "postgres" in Config.DATABASE_URL:
         #     logger.info("Attempting to migrate database schema for PostgreSQL...")
-        migrate_schema()
+        # migrate_schema()
 
     # Initialize database tables if they don't exist
     # init_db()

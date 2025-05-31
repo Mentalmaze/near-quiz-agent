@@ -1070,37 +1070,18 @@ async def show_all_active_leaderboards_command(
         response_message = "🏆 <b>Active Quiz Leaderboards</b> 🏆\n\n"
 
         for quiz_info in active_quizzes:
-            quiz_id_short = quiz_info["id"][:8]
+            quiz_id_full = quiz_info.get("quiz_id", "N/A")
+            quiz_id_short = quiz_id_full[:8]  # Use the full ID for slicing
+            quiz_topic = html.escape(quiz_info.get("quiz_topic", "N/A"))
             response_message += f"<pre>------------------------------</pre>\n"
             # Corrected f-string syntax below
-            response_message += f"🎯 <b>Quiz: \"{html.escape(quiz_info['topic'])}\"</b> (ID: {quiz_id_short})\n"
+            response_message += (
+                f'🎯 <b>Quiz: "{quiz_topic}"</b> (ID: {quiz_id_short})\n'
+            )
 
-            reward_text = "Not specified"
-            if quiz_info.get("reward_schedule") and isinstance(
-                quiz_info["reward_schedule"], dict
-            ):
-                details_text = quiz_info["reward_schedule"].get("details_text")
-                if details_text:
-                    reward_text = html.escape(details_text)
-                else:
-                    if (
-                        isinstance(quiz_info["reward_schedule"], dict)
-                        and quiz_info["reward_schedule"].get("type")
-                        and quiz_info["reward_schedule"].get("details_text")
-                    ):
-                        reward_text = html.escape(
-                            quiz_info["reward_schedule"]["details_text"]
-                        )
-                    elif isinstance(quiz_info["reward_schedule"], str):
-                        reward_text = html.escape(quiz_info["reward_schedule"])
-                    else:
-                        reward_text = "Complex schedule"
-            elif isinstance(
-                quiz_info.get("reward_schedule"), str
-            ):  # Handle if reward_schedule is just a string
-                reward_text = html.escape(quiz_info["reward_schedule"])
-
-            response_message += f"💰 Reward: {reward_text}\n"
+            # Display the parsed reward description returned by the service
+            reward_desc = quiz_info.get("reward_description") or "Not specified"
+            response_message += f"💰 Reward: {html.escape(str(reward_desc))}\n"
 
             if quiz_info.get("end_time"):
                 try:
@@ -1133,14 +1114,17 @@ async def show_all_active_leaderboards_command(
                 response_message += "⏳ Ends: Not specified\n"
 
             response_message += "\n"
-            if quiz_info["leaderboard"]:
+            if quiz_info.get("participants", []):
                 response_message += "<b>Leaderboard:</b>\n"
-                for i, entry in enumerate(quiz_info["leaderboard"][:3]):
+                for i, entry in enumerate(quiz_info["participants"][:3]):
                     rank_emoji = ["🥇", "🥈", "🥉"][i] if i < 3 else "🏅"
                     username = html.escape(
-                        entry["username"] or f"User_{entry['user_id'][:4]}"
+                        entry.get("username")
+                        or f"User_{entry.get('user_id', 'Unknown')[:4]}"
                     )
-                    score = entry["correct_count"]
+                    score = entry.get(
+                        "score", "-"
+                    )  # Changed from entry["correct_count"] to entry.get("score", "-")
                     response_message += (
                         f"{rank_emoji} {i+1}. @{username} - Score: {score}\n"
                     )
@@ -1148,7 +1132,7 @@ async def show_all_active_leaderboards_command(
                 response_message += "<i>No participants yet. Be the first!</i>\n"
 
             response_message += (
-                f"\n➡️ Play this quiz: <code>/playquiz {quiz_info['id']}</code>\n"
+                f"\n➡️ Play this quiz: <code>/playquiz {quiz_id_full}</code>\n"
             )
 
         response_message += "<pre>------------------------------</pre>\n"

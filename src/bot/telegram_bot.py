@@ -67,7 +67,7 @@ class TelegramBot:
                         if isinstance(update, Update) and update.effective_chat:
                             await context.bot.send_message(
                                 chat_id=update.effective_chat.id,
-                                text="⏱️ Sorry, that operation took too long. Please try again.",
+                                text="⏱️ Sorry, that operation took too long. Please reenter the last text again.",
                             )
                     except Exception as e:
                         logger.error(f"Failed to notify user of timeout: {e}")
