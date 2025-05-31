@@ -62,6 +62,15 @@ class TelegramBot:
                 # If we have an update object, we can respond to the user
                 if isinstance(error, TimedOut):
                     logger.warning(f"Timeout error when processing update {update}")
+                    # Prompt user to retry when a timeout occurs
+                    try:
+                        if isinstance(update, Update) and update.effective_chat:
+                            await context.bot.send_message(
+                                chat_id=update.effective_chat.id,
+                                text="⏱️ Sorry, that operation took too long. Please reenter the last text again.",
+                            )
+                    except Exception as e:
+                        logger.error(f"Failed to notify user of timeout: {e}")
                     # Don't try to respond on timeout errors, it might cause another timeout
                     return
 
@@ -117,6 +126,7 @@ class TelegramBot:
             distribute_rewards_handler,
             start_reward_setup_callback,  # Import new reward setup handlers
             handle_reward_method_choice,
+            show_all_active_leaderboards_command,
         )
 
         # Conversation for interactive quiz creation needs to be registered FIRST
@@ -208,6 +218,10 @@ class TelegramBot:
         )  # Register the new handler
         self.app.add_handler(CommandHandler("playquiz", play_quiz_handler))
         self.app.add_handler(CommandHandler("winners", winners_handler))
+        self.app.add_handler(
+            CommandHandler("leaderboards", show_all_active_leaderboards_command)
+        )
+
         # self.app.add_handler(
         #     CommandHandler("distributerewards", distribute_rewards_handler)
         # )

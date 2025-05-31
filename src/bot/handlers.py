@@ -17,12 +17,15 @@ from services.quiz_service import (
     schedule_auto_distribution,
     save_quiz_payment_hash,  # Added import
     save_quiz_reward_details,  # Added import
+    get_leaderboards_for_all_active_quizzes,  # Add this import
 )
 from services.user_service import (
     get_user_wallet,
     set_user_wallet,
     remove_user_wallet,
-)  # Updated imports
+    link_wallet as service_link_wallet,  # Renamed import
+    handle_wallet_address as service_handle_wallet_address,  # Renamed import
+)
 from agent import generate_quiz
 import logging
 import re  # Import re for duration_input and potentially wallet validation
@@ -31,6 +34,10 @@ from typing import Optional  # Added for type hinting
 from utils.config import Config  # Added to access DEPOSIT_ADDRESS
 from store.database import SessionLocal
 from models.quiz import Quiz
+from utils.redis_client import RedisClient  # Added RedisClient import
+from utils.telegram_helpers import safe_send_message  # Ensure this is imported
+import html  # Add this import
+from datetime import datetime, timezone  # Add this import
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -46,13 +53,17 @@ def _escape_markdown_v2_specials(text: str) -> str:
     if not text:  # Ensure text is not None
         return ""
     text = str(text)  # Ensure text is a string
-    text = text.replace(".", "\.")
-    text = text.replace("!", "\!")
-    text = text.replace("-", "\-")
-    text = text.replace("(", "\(")
-    text = text.replace(")", "\)")
-    text = text.replace("+", "\+")
-    text = text.replace("=", "\=")
+    # Escape existing characters
+    text = text.replace(".", "\\.")
+    text = text.replace("!", "\\!")
+    text = text.replace("-", "\\-")
+    text = text.replace("(", "\\(")
+    text = text.replace(")", "\\)")
+    text = text.replace("+", "\\+")
+    text = text.replace("=", "\\=")
+    # Add escaping for > and <
+    text = text.replace(">", "\\>")
+    text = text.replace("<", "\\<")
     # Add other characters if they become problematic and are not part of intended Markdown like backticks or links.
     return text
 
@@ -149,78 +160,88 @@ async def start_createquiz_group(update, context):
     """Entry point for the quiz creation conversation"""
     user = update.effective_user
     chat_type = update.effective_chat.type
+    redis_client = RedisClient()
+    user_id = user.id
+
     logger.info(
-        f"User {user.id} initiating /createquiz from {chat_type} chat {update.effective_chat.id}."
+        f"User {user_id} initiating /createquiz from {chat_type} chat {update.effective_chat.id}."
     )
-    logger.info(
-        f"User_data BEFORE cleaning at quiz creation start for user {user.id}: {context.user_data}"
-    )
+    # logger.info(
+    #     f"User_data BEFORE cleaning at quiz creation start for user {user_id}: {context.user_data}"
+    # ) # Cannot log context.user_data directly anymore
 
     # Clear potentially stale user_data from previous incomplete flows
-    context.user_data.pop("awaiting_reward_input_type", None)
-    context.user_data.pop("current_quiz_id_for_reward_setup", None)
-    context.user_data.pop("awaiting", None)  # Legacy reward structure flag
-    context.user_data.pop("awaiting_reward_quiz_id", None)  # Legacy reward quiz ID flag
+    await redis_client.delete_user_data_key(user_id, "awaiting_reward_input_type")
+    await redis_client.delete_user_data_key(user_id, "current_quiz_id_for_reward_setup")
+    await redis_client.delete_user_data_key(
+        user_id, "awaiting"
+    )  # Legacy reward structure flag
+    await redis_client.delete_user_data_key(
+        user_id, "awaiting_reward_quiz_id"
+    )  # Legacy reward quiz ID flag
 
     # Clear quiz creation specific data
-    context.user_data.pop("topic", None)
-    context.user_data.pop("num_questions", None)
-    context.user_data.pop("context_text", None)
-    context.user_data.pop(
-        "duration_seconds", None
+    await redis_client.delete_user_data_key(user_id, "topic")
+    await redis_client.delete_user_data_key(user_id, "num_questions")
+    await redis_client.delete_user_data_key(user_id, "context_text")
+    await redis_client.delete_user_data_key(
+        user_id, "duration_seconds"
     )  # Ensure any old duration is cleared
-    context.user_data.pop("awaiting_duration_input", None)  # Clear this flag as well
+    await redis_client.delete_user_data_key(
+        user_id, "awaiting_duration_input"
+    )  # Clear this flag as well
 
-    logger.info(
-        f"User_data AFTER cleaning for user {user.id} at quiz creation start: {context.user_data}"
-    )
+    # logger.info(
+    #     f"User_data AFTER cleaning for user {user_id} at quiz creation start: {context.user_data}"
+    # ) # Cannot log context.user_data directly anymore
 
     if chat_type != "private":
         logger.info(
-            f"User {user.id} started quiz creation from group chat {update.effective_chat.id}. Will DM."
+            f"User {user_id} started quiz creation from group chat {update.effective_chat.id}. Will DM."
         )
         await update.message.reply_text(
             f"@{user.username}, let's create a quiz! I'll message you privately to set it up."
         )
         await context.bot.send_message(
-            chat_id=user.id, text="Great—what topic would you like your quiz to cover?"
+            chat_id=user_id, text="Great—what topic would you like your quiz to cover?"
         )
-        context.user_data["group_chat_id"] = update.effective_chat.id
+        await redis_client.set_user_data_key(
+            user_id, "group_chat_id", update.effective_chat.id
+        )
         logger.info(
-            f"Stored group_chat_id {update.effective_chat.id} for user {user.id}. user_data: {context.user_data}"
+            f"Stored group_chat_id {update.effective_chat.id} for user {user_id}."
         )
         return TOPIC
     else:
-        logger.info(f"User {user.id} started quiz creation directly in private chat.")
+        logger.info(f"User {user_id} started quiz creation directly in private chat.")
         await update.message.reply_text(
             "Great—what topic would you like your quiz to cover?"
         )
         # Clear any potential leftover group_chat_id if starting fresh in DM
-        if "group_chat_id" in context.user_data:
-            del context.user_data["group_chat_id"]
-        logger.info(f"User {user.id} in private chat. user_data: {context.user_data}")
+        await redis_client.delete_user_data_key(user_id, "group_chat_id")
+        logger.info(f"User {user_id} in private chat.")
         return TOPIC
 
 
 async def topic_received(update, context):
-    logger.info(
-        f"Received topic: {update.message.text} from user {update.effective_user.id}"
-    )
-    context.user_data["topic"] = update.message.text.strip()
+    user_id = update.effective_user.id
+    redis_client = RedisClient()
+    logger.info(f"Received topic: {update.message.text} from user {user_id}")
+    await redis_client.set_user_data_key(user_id, "topic", update.message.text.strip())
     await update.message.reply_text("How many questions? (send a number)")
     return SIZE
 
 
 async def size_received(update, context):
-    logger.info(
-        f"Received size: {update.message.text} from user {update.effective_user.id}"
-    )
+    user_id = update.effective_user.id
+    redis_client = RedisClient()
+    logger.info(f"Received size: {update.message.text} from user {user_id}")
     try:
         n = int(update.message.text.strip())
     except ValueError:
         await update.message.reply_text("Please send a valid number of questions.")
         return SIZE
-    context.user_data["num_questions"] = n
+    await redis_client.set_user_data_key(user_id, "num_questions", n)
     # ask for optional long text
     buttons = [
         [InlineKeyboardButton("Paste text", callback_data="paste")],
@@ -234,6 +255,8 @@ async def size_received(update, context):
 
 
 async def context_choice(update, context):
+    user_id = update.effective_user.id
+    redis_client = RedisClient()
     choice = update.callback_query.data
     await update.callback_query.answer()
     if choice == "paste":
@@ -242,7 +265,7 @@ async def context_choice(update, context):
         )
         return CONTEXT_INPUT
     # skip
-    context.user_data["context_text"] = None
+    await redis_client.set_user_data_key(user_id, "context_text", None)
     # move to duration
     buttons = [
         [InlineKeyboardButton("Specify duration", callback_data="set_duration")],
@@ -253,15 +276,17 @@ async def context_choice(update, context):
         reply_markup=InlineKeyboardMarkup(buttons),
     )
     # Set the expectation that if user doesn't click a button, they might type a duration
-    context.user_data["awaiting_duration_input"] = True
+    await redis_client.set_user_data_key(user_id, "awaiting_duration_input", True)
     logger.info(
-        f"Showing duration options to user {update.effective_user.id} after context_choice, set awaiting_duration_input=True"
+        f"Showing duration options to user {user_id} after context_choice, set awaiting_duration_input=True"
     )
     return DURATION_CHOICE
 
 
 async def context_input(update, context):
-    context.user_data["context_text"] = update.message.text
+    user_id = update.effective_user.id
+    redis_client = RedisClient()
+    await redis_client.set_user_data_key(user_id, "context_text", update.message.text)
     # ask duration
     buttons = [
         [InlineKeyboardButton("Specify duration", callback_data="set_duration")],
@@ -272,50 +297,55 @@ async def context_input(update, context):
         reply_markup=InlineKeyboardMarkup(buttons),
     )
     # Set the expectation that if user doesn't click a button, they might type a duration
-    context.user_data["awaiting_duration_input"] = True
+    await redis_client.set_user_data_key(user_id, "awaiting_duration_input", True)
     logger.info(
-        f"Showing duration options to user {update.effective_user.id} after context_input, set awaiting_duration_input=True"
+        f"Showing duration options to user {user_id} after context_input, set awaiting_duration_input=True"
     )
     return DURATION_CHOICE
 
 
 async def duration_choice(update, context):
+    user_id = update.effective_user.id
+    redis_client = RedisClient()
     choice = update.callback_query.data
     await update.callback_query.answer()
-    logger.info(f"duration_choice: User {update.effective_user.id} selected {choice}")
+    logger.info(f"duration_choice: User {user_id} selected {choice}")
 
     if choice == "set_duration":
         # Set a special flag to identify duration input messages
-        context.user_data["awaiting_duration_input"] = True
-        logger.info(
-            f"Setting awaiting_duration_input flag for user {update.effective_user.id}"
-        )
+        await redis_client.set_user_data_key(user_id, "awaiting_duration_input", True)
+        logger.info(f"Setting awaiting_duration_input flag for user {user_id}")
 
         await update.callback_query.message.reply_text(
             "Send duration, e.g. '5 minutes' or '2 hours'."
         )
         logger.info(
-            f"duration_choice: Returning DURATION_INPUT state for user {update.effective_user.id}"
+            f"duration_choice: Returning DURATION_INPUT state for user {user_id}"
         )
         return DURATION_INPUT
     # skip ("skip_duration")
-    context.user_data["duration_seconds"] = None  # Explicitly set to None if skipped
+    await redis_client.set_user_data_key(
+        user_id, "duration_seconds", None
+    )  # Explicitly set to None if skipped
     # Clear the flag if it was set and then skipped via button
-    context.user_data.pop("awaiting_duration_input", None)
+    await redis_client.delete_user_data_key(user_id, "awaiting_duration_input")
     logger.info(
-        f"duration_choice: User {update.effective_user.id} skipped duration, duration_seconds set to None. Going to confirm_prompt"
+        f"duration_choice: User {user_id} skipped duration, duration_seconds set to None. Going to confirm_prompt"
     )
     # preview
-    return await confirm_prompt(update, context)
+    return await confirm_prompt(
+        update, context
+    )  # confirm_prompt will need redis_client too
 
 
 async def duration_input(update, context):
     user_id = update.effective_user.id
+    redis_client = RedisClient()
     message_text = update.message.text
     logger.info(
         f"Attempting to process DURATION_INPUT: '{message_text}' from user {user_id}"
     )
-    logger.debug(f"User data for {user_id} at duration_input: {context.user_data}")
+    # logger.debug(f"User data for {user_id} at duration_input: {context.user_data}") # Cannot log context.user_data
     txt = message_text.strip().lower()
 
     parsed_successfully = False
@@ -331,7 +361,7 @@ async def duration_input(update, context):
         else:  # minute or min
             secs = val * 60
 
-        context.user_data["duration_seconds"] = secs
+        await redis_client.set_user_data_key(user_id, "duration_seconds", secs)
         logger.info(
             f"Successfully parsed duration (primary regex) for user {user_id}: {secs} seconds from '{message_text}'"
         )
@@ -343,27 +373,32 @@ async def duration_input(update, context):
             val = int(m_val_search.group(1))
             if "hour" in txt or "hr" in txt:
                 secs = val * 3600
-                context.user_data["duration_seconds"] = secs
+                await redis_client.set_user_data_key(user_id, "duration_seconds", secs)
                 logger.info(
                     f"Successfully parsed duration (fallback - hours) for user {user_id}: {secs} seconds from '{message_text}'"
                 )
                 parsed_successfully = True
             elif "minute" in txt or "min" in txt:
                 secs = val * 60
-                context.user_data["duration_seconds"] = secs
+                await redis_client.set_user_data_key(user_id, "duration_seconds", secs)
                 logger.info(
                     f"Successfully parsed duration (fallback - minutes) for user {user_id}: {secs} seconds from '{message_text}'"
                 )
                 parsed_successfully = True
 
     if parsed_successfully:
-        context.user_data.pop(
-            "awaiting_duration_input", None
+        await redis_client.delete_user_data_key(
+            user_id, "awaiting_duration_input"
         )  # Clear flag as input is now processed
-        logger.info(
-            f"duration_input: Parsed successfully, proceeding to confirm_prompt for user {user_id}. duration_seconds: {context.user_data.get('duration_seconds')}"
+        duration_seconds_val = await redis_client.get_user_data_key(
+            user_id, "duration_seconds"
         )
-        return await confirm_prompt(update, context)
+        logger.info(
+            f"duration_input: Parsed successfully, proceeding to confirm_prompt for user {user_id}. duration_seconds: {duration_seconds_val}"
+        )
+        return await confirm_prompt(
+            update, context
+        )  # confirm_prompt will need redis_client too
     else:
         # If parsing failed either way
         await update.message.reply_text(
@@ -375,10 +410,19 @@ async def duration_input(update, context):
 
 
 async def confirm_prompt(update, context):
-    topic = context.user_data["topic"]
-    n = context.user_data["num_questions"]
-    has_ctx = bool(context.user_data.get("context_text"))
-    dur = context.user_data.get("duration_seconds")
+    user_id = update.effective_user.id
+    redis_client = RedisClient()
+
+    topic = await redis_client.get_user_data_key(user_id, "topic")
+    n = await redis_client.get_user_data_key(user_id, "num_questions")
+    context_text_val = await redis_client.get_user_data_key(user_id, "context_text")
+    has_ctx = bool(context_text_val)
+    dur = await redis_client.get_user_data_key(user_id, "duration_seconds")
+
+    # Ensure n and dur are not None before using in f-string or arithmetic
+    n = n if n is not None else 0  # Default to 0 if not found, or handle error
+    topic = topic if topic is not None else "[Unknown Topic]"  # Default if not found
+
     text = f"Ready to generate a {n}-question quiz on '{topic}'"
     text += " based on your text" if has_ctx else ""
     text += f", open for {dur//60} minutes" if dur else ""
@@ -396,36 +440,53 @@ async def confirm_prompt(update, context):
 
 
 async def confirm_choice(update, context):
+    user_id = update.effective_user.id
+    redis_client = RedisClient()
     choice = update.callback_query.data
     await update.callback_query.answer()
+
     if choice == "no":
         await update.callback_query.message.reply_text("Quiz creation canceled.")
-        context.user_data.clear()  # Clear data on cancellation
+        await redis_client.clear_user_data(user_id)  # Clear data on cancellation
         return ConversationHandler.END
+
     # yes: generate and post
     await update.callback_query.message.reply_text("🛠 Generating your quiz—one moment…")
-    data = context.user_data
-    quiz_text = await generate_quiz(
-        data["topic"], data["num_questions"], data.get("context_text")
-    )
 
-    group_chat_id_to_use = data.get("group_chat_id", update.effective_chat.id)
+    # Fetch all necessary data from Redis
+    topic = await redis_client.get_user_data_key(user_id, "topic")
+    num_questions = await redis_client.get_user_data_key(user_id, "num_questions")
+    context_text = await redis_client.get_user_data_key(user_id, "context_text")
+    group_chat_id = await redis_client.get_user_data_key(user_id, "group_chat_id")
+    duration_seconds = await redis_client.get_user_data_key(user_id, "duration_seconds")
+
+    # Handle cases where essential data might be missing (e.g., if Redis errored or keys expired)
+    if not topic or num_questions is None:  # num_questions can be 0, so check for None
+        logger.error(
+            f"Missing essential quiz data for user {user_id} in confirm_choice. Topic: {topic}, NumQ: {num_questions}"
+        )
+        await update.callback_query.message.reply_text(
+            "Sorry, some quiz details were lost. Please start over."
+        )
+        await redis_client.clear_user_data(user_id)
+        return ConversationHandler.END
+
+    quiz_text = await generate_quiz(topic, num_questions, context_text)
+
+    group_chat_id_to_use = group_chat_id if group_chat_id else update.effective_chat.id
 
     # Call process_questions with duration_seconds
     await process_questions(
         update,
         context,
-        data["topic"],
+        topic,
         quiz_text,
         group_chat_id_to_use,
-        duration_seconds=data.get("duration_seconds"),  # Pass duration_seconds directly
+        duration_seconds=duration_seconds,  # Pass duration_seconds directly
     )
 
-    # schedule_auto_distribution is already called within process_questions if end_time is set
-    # So, no need to call it separately here unless the logic changes.
-
     # Clear conversation data for quiz creation
-    context.user_data.clear()
+    await redis_client.clear_user_data(user_id)
     return ConversationHandler.END
 
 
@@ -433,6 +494,8 @@ async def start_reward_setup_callback(update: Update, context: CallbackContext):
     """Handles the 'Setup Rewards' button press and presents reward configuration options."""
     query = update.callback_query
     await query.answer()  # Acknowledge the button press
+    user_id = update.effective_user.id
+    redis_client = RedisClient()
 
     try:
         action, quiz_id = query.data.split(":")
@@ -451,11 +514,11 @@ async def start_reward_setup_callback(update: Update, context: CallbackContext):
         )
         return
 
-    context.user_data["current_quiz_id_for_reward_setup"] = quiz_id
-
-    logger.info(
-        f"User {update.effective_user.id} starting reward setup for quiz {quiz_id}"
+    await redis_client.set_user_data_key(
+        user_id, "current_quiz_id_for_reward_setup", quiz_id
     )
+
+    logger.info(f"User {user_id} starting reward setup for quiz {quiz_id}")
 
     keyboard = [
         [
@@ -498,6 +561,8 @@ async def handle_reward_method_choice(update: Update, context: CallbackContext):
     """Handles the choice of reward method (WTA, Top3, Custom, Manual)."""
     query = update.callback_query
     await query.answer()
+    user_id = update.effective_user.id
+    redis_client = RedisClient()
 
     try:
         _, method, quiz_id = query.data.split(":")
@@ -508,39 +573,51 @@ async def handle_reward_method_choice(update: Update, context: CallbackContext):
         await query.edit_message_text("Error: Invalid selection. Please try again.")
         return
 
-    context.user_data["current_quiz_id_for_reward_setup"] = quiz_id  # Ensure it's set
+    await redis_client.set_user_data_key(
+        user_id, "current_quiz_id_for_reward_setup", quiz_id
+    )  # Ensure it's set
 
     if method == "wta":
-        context.user_data["awaiting_reward_input_type"] = "wta_amount"
+        await redis_client.set_user_data_key(
+            user_id, "awaiting_reward_input_type", "wta_amount"
+        )
         await query.edit_message_text(
             f"🏆 Winner Takes All selected for Quiz {quiz_id}.\nPlease enter the total prize amount (e.g., '5 NEAR', '10 USDT')."
         )
     elif method == "top3":
-        context.user_data["awaiting_reward_input_type"] = "top3_details"
+        await redis_client.set_user_data_key(
+            user_id, "awaiting_reward_input_type", "top3_details"
+        )
         await query.edit_message_text(
             f"🥇🥈🥉 Reward Top 3 selected for Quiz {quiz_id}.\nPlease describe the rewards for 1st, 2nd, and 3rd place (e.g., '3 NEAR for 1st, 2 NEAR for 2nd, 1 NEAR for 3rd')."
         )
     elif method == "custom":
-        context.user_data["awaiting_reward_input_type"] = "custom_details"
+        await redis_client.set_user_data_key(
+            user_id, "awaiting_reward_input_type", "custom_details"
+        )
         await query.edit_message_text(
             f"✨ Custom Setup for Quiz {quiz_id}.\nFor now, please describe the reward structure manually (e.g., '1st: 5N, 2nd-5th: 1N each')."
         )
     elif method == "manual":
-        context.user_data["awaiting_reward_input_type"] = "manual_free_text"
+        await redis_client.set_user_data_key(
+            user_id, "awaiting_reward_input_type", "manual_free_text"
+        )
         await query.edit_message_text(
             f"✍️ Manual Input selected for Quiz {quiz_id}.\nPlease type the reward structure (e.g., '2 Near for 1st, 1 Near for 2nd')."
         )
     elif method == "cancel_setup":
         await query.edit_message_text(f"Reward setup for Quiz {quiz_id} cancelled.")
-        context.user_data.pop("current_quiz_id_for_reward_setup", None)
-        context.user_data.pop("awaiting_reward_input_type", None)
+        await redis_client.delete_user_data_key(
+            user_id, "current_quiz_id_for_reward_setup"
+        )
+        await redis_client.delete_user_data_key(user_id, "awaiting_reward_input_type")
         return ConversationHandler.END  # Or just return if not in a conv
     else:
         await query.edit_message_text("Invalid choice. Please try again.")
         return
 
     logger.info(
-        f"User {update.effective_user.id} selected reward method {method} for quiz {quiz_id}. User_data: {context.user_data}"
+        f"User {user_id} selected reward method {method} for quiz {quiz_id}."  # Cannot log user_data directly
     )
     # Subsequent input will be handled by private_message_handler
     # based on 'awaiting_reward_input_type'.
@@ -552,51 +629,9 @@ async def create_quiz_handler(update: Update, context: CallbackContext):
 
 
 async def link_wallet_handler(update: Update, context: CallbackContext):
-    """Handler for /linkwallet command."""
-    user = update.effective_user
-    if not user:
-        await update.message.reply_text("Could not identify user.")
-        return
-
-    user_id = user.id
-
-    # Check if wallet is already linked
-    # This assumes get_user_wallet returns the wallet address if linked, or None otherwise
-    existing_wallet = await get_user_wallet(user_id)
-    if existing_wallet:
-        await update.message.reply_text(
-            f"You have already linked the wallet: `{existing_wallet}`.\n"
-            "If you want to link a new wallet, please use /unlinkwallet first."
-        )
-        return
-
-    if not context.args:
-        await update.message.reply_text(
-            "Please provide your wallet address after the command.\n"
-            "Example: `/linkwallet yourwallet.near`"
-        )
-        return
-
-    wallet_address = context.args[0].strip()
-
-    # Only allow mainnet .near addresses
-    if not (
-        wallet_address.endswith(".near") and not wallet_address.endswith(".testnet")
-    ):
-        await update.message.reply_text(
-            "❌ Only mainnet NEAR wallets are allowed. Please provide a wallet address ending with '.near' (not '.testnet')."
-        )
-        return
-
-    # This assumes set_user_wallet returns True on success, False on failure
-    if await set_user_wallet(user_id, wallet_address):
-        await update.message.reply_text(
-            f"✅ Wallet `{wallet_address}` linked successfully!"
-        )
-    else:
-        await update.message.reply_text(
-            "⚠️ Failed to link your wallet. Please try again or contact support."
-        )
+    """Handler for /linkwallet command - uses service to prompt for wallet."""
+    # This now calls the function from user_service.py
+    await service_link_wallet(update, context)
 
 
 async def unlink_wallet_handler(update: Update, context: CallbackContext):
@@ -672,24 +707,42 @@ async def quiz_answer_handler(update: Update, context: CallbackContext):
 
 async def private_message_handler(update: Update, context: CallbackContext):
     """Route private text messages to the appropriate handler."""
-    user_id = update.effective_user.id
+    user_id = str(update.effective_user.id)  # Ensure user_id is string
     message_text = update.message.text
+    # redis_client = RedisClient() # Removed instance creation
+
     logger.info(
         f"PRIVATE_MESSAGE_HANDLER received: '{message_text}' from user {user_id}"
     )
-    logger.info(
-        f"User_data for {user_id} in private_message_handler: {context.user_data}"
-    )
+
+    # Check if awaiting wallet address
+    is_awaiting_wallet = await RedisClient.get_user_data_key(
+        user_id, "awaiting"
+    )  # Use static method
+    logger.info(f"User {user_id} 'awaiting' state from Redis: {is_awaiting_wallet}")
+    if is_awaiting_wallet == "wallet_address":
+        logger.info(
+            f"User {user_id} is awaiting wallet_address. Calling service_handle_wallet_address."
+        )
+        await service_handle_wallet_address(update, context)
+        return
 
     # Check if awaiting payment hash
-    quiz_id_awaiting_hash = context.user_data.get("awaiting_payment_hash_for_quiz_id")
+    quiz_id_awaiting_hash = await RedisClient.get_user_data_key(  # Use static method
+        user_id, "awaiting_payment_hash_for_quiz_id"
+    )
     if quiz_id_awaiting_hash:
         payment_hash = message_text.strip()
         logger.info(
             f"Handling payment hash input '{payment_hash}' for quiz {quiz_id_awaiting_hash} from user {user_id}"
         )
 
-        save_success = await save_quiz_payment_hash(quiz_id_awaiting_hash, payment_hash)
+        # Pass context.application to save_quiz_payment_hash
+        save_success = await save_quiz_payment_hash(
+            quiz_id_awaiting_hash,
+            payment_hash,
+            context.application,  # Pass application context
+        )
 
         if save_success:
             await update.message.reply_text(
@@ -703,13 +756,13 @@ async def private_message_handler(update: Update, context: CallbackContext):
                     session.query(Quiz).filter(Quiz.id == quiz_id_awaiting_hash).first()
                 )
                 if quiz and quiz.group_chat_id:
+                    # ... (rest of the announcement logic remains the same)
                     announce_text = "@all \n"
                     announce_text += f"📣 New quiz '**{_escape_markdown_v2_specials(quiz.topic)}**' is now active! 🎯\n\n"
 
                     num_questions = len(quiz.questions) if quiz.questions else "N/A"
                     announce_text += f"📚 **{num_questions} Questions**\n"
 
-                    # Include reward structure if available
                     schedule = quiz.reward_schedule or {}
                     reward_details_text = schedule.get("details_text", "")
                     reward_type = schedule.get("type", "")
@@ -732,7 +785,6 @@ async def private_message_handler(update: Update, context: CallbackContext):
                         announce_text += f"⏳ **Ends**: No specific end time set.\n"
 
                     announce_text += "\nType `/playquiz` to participate!"
-
                     logger.info(
                         f"Attempting to send announcement to group {quiz.group_chat_id}:\n{announce_text}"
                     )
@@ -747,7 +799,6 @@ async def private_message_handler(update: Update, context: CallbackContext):
                         logger.error(
                             f"Failed to send announcement with MarkdownV2: {e}. Sending as plain text."
                         )
-                        # Fallback to plain text if MarkdownV2 fails
                         plain_announce_text = "@all \n"
                         plain_announce_text += (
                             f"New quiz '{quiz.topic}' is now active! \n"
@@ -770,136 +821,175 @@ async def private_message_handler(update: Update, context: CallbackContext):
                         await context.bot.send_message(
                             chat_id=quiz.group_chat_id, text=plain_announce_text
                         )
+                    finally:
+                        # Activate quiz and set end time when funded
+                        from models.quiz import QuizStatus
+                        from datetime import datetime, timedelta
 
+                        session2 = SessionLocal()
+                        try:
+                            q = (
+                                session2.query(Quiz)
+                                .filter(Quiz.id == quiz_id_awaiting_hash)
+                                .first()
+                            )
+                            if q:
+                                q.status = QuizStatus.ACTIVE
+                                q.activated_at = datetime.utcnow()
+                                if q.duration_seconds:
+                                    q.end_time = q.activated_at + timedelta(
+                                        seconds=q.duration_seconds
+                                    )
+                                session2.commit()
+                                # Schedule auto distribution
+                                await schedule_auto_distribution(
+                                    context.application,
+                                    q.id,
+                                    q.duration_seconds or 0,
+                                )
+                        finally:
+                            session2.close()
             except Exception as e:
                 logger.error(f"Error during quiz announcement: {e}", exc_info=True)
             finally:
                 session.close()
-
         else:
             await update.message.reply_text(
                 f"⚠️ There was an issue saving your transaction hash for Quiz ID {quiz_id_awaiting_hash}. "
                 "Please try sending the hash again or contact support."
             )
-        context.user_data.pop("awaiting_payment_hash_for_quiz_id", None)
+        await RedisClient.delete_user_data_key(  # Use static method
+            user_id, "awaiting_payment_hash_for_quiz_id"
+        )
         return
 
     # Check for reward input (WTA, Top3, Custom, Manual)
-    awaiting_reward_type = context.user_data.get("awaiting_reward_input_type")
-    quiz_id_for_setup = context.user_data.get("current_quiz_id_for_reward_setup")
+    # Ensure awaiting_reward_type and quiz_id_for_setup are fetched before use
+    awaiting_reward_type = await RedisClient.get_user_data_key(
+        user_id, "awaiting_reward_input_type"
+    )
+    quiz_id_for_setup = await RedisClient.get_user_data_key(
+        user_id, "current_quiz_id_for_reward_setup"
+    )
 
     if awaiting_reward_type and quiz_id_for_setup:
         logger.info(
             f"Handling reward input type: {awaiting_reward_type} for quiz {quiz_id_for_setup} from user {user_id}. Message: '{message_text}'"
         )
 
-        # Save reward details to DB
-        save_reward_success = await save_quiz_reward_details(
-            quiz_id_for_setup, awaiting_reward_type, message_text
+        # First, try to parse the input
+        total_amount, currency = _parse_reward_details_for_total(
+            message_text, awaiting_reward_type
         )
+        logger.info(f"Parsed reward: Amount={total_amount}, Currency={currency}")
 
-        if save_reward_success:
-            friendly_method_name = "your reward details"  # Default
-            if awaiting_reward_type == "wta_amount":
-                friendly_method_name = "Winner Takes All amount"
-            elif awaiting_reward_type == "top3_details":
-                friendly_method_name = "Top 3 reward details"
-            elif awaiting_reward_type == "custom_details":
-                friendly_method_name = "custom reward details"
-            elif awaiting_reward_type == "manual_free_text":
-                friendly_method_name = "manually entered reward text"
-
-            reward_confirmation_content = (
-                f"✅ Got it! I've noted down {friendly_method_name} as: '{_escape_markdown_v2_specials(message_text)}' for Quiz ID {quiz_id_for_setup}.\n"
-                f"The rewards for this quiz are now set up."
-            )
-            logger.info(
-                f"Reward confirmation content prepared: {reward_confirmation_content}"
+        if total_amount is not None and currency:
+            # Parsing successful, now save and proceed
+            save_reward_success = await save_quiz_reward_details(
+                quiz_id_for_setup, awaiting_reward_type, message_text
             )
 
-            # Attempt to parse for total amount and currency
-            total_amount, currency = _parse_reward_details_for_total(
-                message_text, awaiting_reward_type
-            )
-            logger.info(f"Parsed reward: Amount={total_amount}, Currency={currency}")
+            if save_reward_success:
+                friendly_method_name = "your reward details"
+                if awaiting_reward_type == "wta_amount":
+                    friendly_method_name = "Winner Takes All amount"
+                elif awaiting_reward_type == "top3_details":
+                    friendly_method_name = "Top 3 reward details"
+                elif awaiting_reward_type == "custom_details":
+                    friendly_method_name = "custom reward details"
+                elif awaiting_reward_type == "manual_free_text":
+                    friendly_method_name = "manually entered reward text"
 
-            if total_amount is not None and currency:
-                fee = round(total_amount * 0.02, 6)
+                reward_confirmation_content = (
+                    f"✅ Got it! I\\'ve noted down {friendly_method_name} as: '{_escape_markdown_v2_specials(message_text)}' for Quiz ID {quiz_id_for_setup}.\\n"
+                    f"The rewards for this quiz are now set up."
+                )
+                logger.info(
+                    f"Reward confirmation content prepared: {reward_confirmation_content}"
+                )
+
+                fee = round(total_amount * 0.02, 6)  # Calculate 2% fee
                 total_with_fee = round(total_amount + fee, 6)
                 deposit_instructions = (
                     f"💰 Please deposit *{total_with_fee} {currency}* (includes 2% fee: {fee} {currency}) "
-                    f"to the following address to fund the quiz: `{Config.DEPOSIT_ADDRESS}`\n\n"
+                    f"to the following address to fund the quiz: `{Config.DEPOSIT_ADDRESS}`\\n\\n"
                     f"Once sent, please reply with the *transaction hash*."
                 )
-            else:
-                deposit_instructions = (
-                    f"⚠️ I couldn't automatically determine the total amount/currency from your input. "
-                    f"Please ensure you deposit the correct total amount to fund the quiz to `{Config.DEPOSIT_ADDRESS}`.\n\n"
-                    f"Once sent, please reply with the *transaction hash*."
-                )
-            logger.info(f"Deposit instructions prepared: {deposit_instructions}")
+                logger.info(f"Deposit instructions prepared: {deposit_instructions}")
+                prompt_for_hash_message = "I\\'m now awaiting the transaction hash."
 
-            prompt_for_hash_message = "I'm now awaiting the transaction hash."
+                try:
+                    logger.info(
+                        f"Attempting to send reward confirmation for {awaiting_reward_type} to user {user_id}."
+                    )
+                    await asyncio.wait_for(
+                        update.message.reply_text(text=reward_confirmation_content),
+                        timeout=30.0,
+                    )
+                    logger.info(
+                        f"Reward confirmation sent. Attempting to send deposit instructions for {awaiting_reward_type} to user {user_id}."
+                    )
+                    await asyncio.wait_for(
+                        update.message.reply_text(
+                            text=deposit_instructions, parse_mode="Markdown"
+                        ),
+                        timeout=30.0,
+                    )
+                    logger.info(
+                        f"Deposit instructions sent. Attempting to send prompt for hash for {awaiting_reward_type} to user {user_id}."
+                    )
+                    await asyncio.wait_for(
+                        update.message.reply_text(text=prompt_for_hash_message),
+                        timeout=30.0,
+                    )
+                    logger.info(
+                        f"All reward setup messages sent successfully for {awaiting_reward_type} to user {user_id}."
+                    )
 
-            try:
-                logger.info(
-                    f"Attempting to send reward confirmation for {awaiting_reward_type} to user {user_id}."
-                )
-                await asyncio.wait_for(
-                    update.message.reply_text(text=reward_confirmation_content),
-                    timeout=30.0,  # Increased timeout
-                )
-                logger.info(
-                    f"Reward confirmation sent. Attempting to send deposit instructions for {awaiting_reward_type} to user {user_id}."
-                )
-                await asyncio.wait_for(
-                    update.message.reply_text(
-                        text=deposit_instructions, parse_mode="Markdown"
-                    ),
-                    timeout=30.0,  # Increased timeout
-                )
-                logger.info(
-                    f"Deposit instructions sent. Attempting to send prompt for hash for {awaiting_reward_type} to user {user_id}."
-                )
-                await asyncio.wait_for(
-                    update.message.reply_text(text=prompt_for_hash_message),
-                    timeout=30.0,  # Increased timeout
-                )
-                logger.info(
-                    f"All reward setup messages sent successfully for {awaiting_reward_type} to user {user_id}."
-                )
-
-                # Transition to awaiting payment hash state
-                context.user_data["awaiting_payment_hash_for_quiz_id"] = (
-                    quiz_id_for_setup
-                )
-                logger.info(
-                    f"Set 'awaiting_payment_hash_for_quiz_id' to {quiz_id_for_setup} for user {user_id}. Current user_data: {context.user_data}"
-                )
-
-            except asyncio.TimeoutError:
-                logger.error(
-                    f"Timeout occurred during reward setup/payment prompt for {awaiting_reward_type} to user {user_id}"
-                )
+                    await RedisClient.set_user_data_key(  # Use static method
+                        user_id, "awaiting_payment_hash_for_quiz_id", quiz_id_for_setup
+                    )
+                    await RedisClient.delete_user_data_key(  # Use static method
+                        user_id, "awaiting_reward_input_type"
+                    )
+                    await RedisClient.delete_user_data_key(  # Use static method
+                        user_id, "current_quiz_id_for_reward_setup"
+                    )
+                    logger.info(
+                        f"Set 'awaiting_payment_hash_for_quiz_id' to {quiz_id_for_setup} for user {user_id}."
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(
+                        f"Timeout occurred during reward setup/payment prompt for {awaiting_reward_type} to user {user_id}"
+                    )
+                    await update.message.reply_text(
+                        "⚠️ I tried to send the next steps, but it took too long. "
+                        "If you\\'ve already provided the reward details, please send the transaction hash for your deposit. "
+                        f"If not, you might need to restart the reward setup for Quiz ID {quiz_id_for_setup}."
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Error sending reward setup/payment prompt for {awaiting_reward_type} to user {user_id}: {e}",
+                        exc_info=True,
+                    )
+                    await update.message.reply_text(
+                        "⚠️ An error occurred while sending the next steps. "
+                        f"Please check the logs or contact support. You might need to restart reward setup for Quiz ID {quiz_id_for_setup}."
+                    )
+            else:  # save_reward_success was False
                 await update.message.reply_text(
-                    "⚠️ I tried to send the next steps, but it took too long. "
-                    "If you've already provided the reward details, please send the transaction hash for your deposit. "
-                    f"If not, you might need to restart the reward setup for Quiz ID {quiz_id_for_setup}."
+                    "⚠️ There was an issue saving your reward details. Please try sending them again."
                 )
-            except Exception as e:
-                logger.error(
-                    f"Error sending reward setup/payment prompt for {awaiting_reward_type} to user {user_id}: {e}",
-                    exc_info=True,
-                )
-                await update.message.reply_text(
-                    "⚠️ An error occurred while sending the next steps. "
-                    f"Please check the logs or contact support. You might need to restart reward setup for Quiz ID {quiz_id_for_setup}."
-                )
-        else:
-            await update.message.reply_text(
-                "⚠️ There was an issue saving your reward details. Please try sending them again."
+        else:  # Parsing failed (total_amount is None or currency is None)
+            # Save the raw input anyway, in case it's useful or for manual review
+            await save_quiz_reward_details(
+                quiz_id_for_setup, awaiting_reward_type, message_text
             )
-            # Do not clear state, allow user to retry sending the details.
+            await update.message.reply_text(
+                f"⚠️ I couldn\\'t automatically determine the total amount and currency from your input: '{_escape_markdown_v2_specials(message_text)}'.\\n"
+                f"Please enter the prize amount including the currency (e.g., '5 NEAR', '0.1 USDT')."
+            )
+            # Do not change Redis state, user needs to re-enter.
 
         logger.info(
             f"Returning from private_message_handler after processing reward input for {awaiting_reward_type} for user {user_id}."
@@ -907,50 +997,44 @@ async def private_message_handler(update: Update, context: CallbackContext):
         return
 
     # Check for duration input flag
-    if context.user_data.get("awaiting_duration_input"):
+    is_awaiting_duration_input = (
+        await RedisClient.get_user_data_key(  # Use static method
+            user_id, "awaiting_duration_input"
+        )
+    )
+    if is_awaiting_duration_input:
         logger.info(
             f"User {user_id} is awaiting duration input. Processing duration: '{message_text}' in private_message_handler"
         )
-        # Clear the flag
-        context.user_data.pop("awaiting_duration_input", None)  # Changed to pop
+        await RedisClient.delete_user_data_key(
+            user_id, "awaiting_duration_input"
+        )  # Use static method
 
-        # Parse duration input
         txt = message_text.strip().lower()
         m = re.match(r"(\d+)\s*(minute|hour|min)s?", txt)
         if m:
             val = int(m.group(1))
             unit = m.group(2)
-            secs = val * (3600 if unit.startswith("hour") else 60)
-            context.user_data["duration_seconds"] = secs
-            logger.info(
-                f"Successfully parsed duration for user {user_id}: {secs} seconds from '{message_text}'"
-            )
-        else:
-            # Try a more flexible regex
-            m = re.search(r"(\d+)", txt)
-            if m and ("minute" in txt.lower() or "min" in txt.lower()):
-                val = int(m.group(1))
+            if unit in ("minute", "min"):
                 secs = val * 60
-                context.user_data["duration_seconds"] = secs
-                logger.info(
-                    f"Flexibly parsed duration: {secs} seconds from '{message_text}'"
-                )
-            elif m and "hour" in txt.lower():
-                val = int(m.group(1))
+            elif unit == "hour":
                 secs = val * 3600
-                context.user_data["duration_seconds"] = secs
-                logger.info(
-                    f"Flexibly parsed duration: {secs} seconds from '{message_text}'"
-                )
-            else:
-                context.user_data["duration_seconds"] = 300  # Default to 5 minutes
-                logger.info(
-                    f"Could not parse duration from '{message_text}'. Using default: 300 seconds"
-                )
-                await update.message.reply_text(
-                    "I couldn't understand that format. Using 5 minutes by default."
-                )
-        return await confirm_prompt(update, context)
+            await RedisClient.set_user_data_key(
+                user_id, "duration_seconds", secs
+            )  # Use static method
+            logger.info(
+                f"Successfully parsed duration '{message_text}' to {secs} seconds for user {user_id}. Proceeding to confirm_prompt."
+            )
+            await confirm_prompt(update, context)
+            return
+        else:
+            logger.warning(
+                f"Could not parse duration input '{message_text}' from user {user_id} using primary regex. Replying with error."
+            )
+            await update.message.reply_text(
+                "Hmm, I didn't quite catch that duration. Please use a format like '10 minutes' or '2 hours'."
+            )
+            return
 
     logger.info(
         f"Message from user {user_id} ('{message_text}') is NOT for reward structure or duration input. Checking ConversationHandler."
@@ -965,3 +1049,110 @@ async def winners_handler(update: Update, context: CallbackContext):
 async def distribute_rewards_handler(update: Update, context: CallbackContext):
     """Handler for /distributerewards command to send NEAR rewards to winners."""
     await distribute_quiz_rewards(update, context)
+
+
+async def show_all_active_leaderboards_command(
+    update: Update, context: CallbackContext
+):
+    """Displays leaderboards for all active quizzes in a more user-friendly format."""
+    session = SessionLocal()
+    try:
+        active_quizzes = await get_leaderboards_for_all_active_quizzes()
+
+        if not active_quizzes:
+            await safe_send_message(
+                context.bot,
+                update.effective_chat.id,
+                "🏁 No active quizzes found at the moment. Create one with /createquiz!",
+            )
+            return
+
+        response_message = "🏆 <b>Active Quiz Leaderboards</b> 🏆\n\n"
+
+        for quiz_info in active_quizzes:
+            quiz_id_full = quiz_info.get("quiz_id", "N/A")
+            quiz_id_short = quiz_id_full[:8]  # Use the full ID for slicing
+            quiz_topic = html.escape(quiz_info.get("quiz_topic", "N/A"))
+            response_message += f"<pre>------------------------------</pre>\n"
+            # Corrected f-string syntax below
+            response_message += (
+                f'🎯 <b>Quiz: "{quiz_topic}"</b> (ID: {quiz_id_short})\n'
+            )
+
+            # Display the parsed reward description returned by the service
+            reward_desc = quiz_info.get("reward_description") or "Not specified"
+            response_message += f"💰 Reward: {html.escape(str(reward_desc))}\n"
+
+            if quiz_info.get("end_time"):
+                try:
+                    end_time_dt = datetime.fromisoformat(
+                        quiz_info["end_time"].replace("Z", "+00:00")
+                    )
+                    time_left_str = "Ended"
+                    now_utc = datetime.now(timezone.utc)
+                    if end_time_dt > now_utc:
+                        delta = end_time_dt - now_utc
+                        days, remainder = divmod(delta.total_seconds(), 86400)
+                        hours, remainder = divmod(remainder, 3600)
+                        minutes, _ = divmod(remainder, 60)
+                        time_left_parts = []
+                        if days > 0:
+                            time_left_parts.append(f"{int(days)}d")
+                        if hours > 0:
+                            time_left_parts.append(f"{int(hours)}h")
+                        if minutes > 0 or not time_left_parts:
+                            time_left_parts.append(f"{int(minutes)}m")
+                        # Corrected join logic for time_left_str
+                        if time_left_parts:
+                            time_left_str = " ".join(time_left_parts) + " left"
+                        else:
+                            time_left_str = "Ending soon"
+                    response_message += f"⏳ Ends: {html.escape(end_time_dt.strftime('%b %d, %H:%M UTC'))} ({html.escape(time_left_str)})\n"
+                except ValueError:
+                    response_message += f"⏳ Ends: {html.escape(quiz_info['end_time'])} (Could not parse time)\n"
+            else:
+                response_message += "⏳ Ends: Not specified\n"
+
+            response_message += "\n"
+            if quiz_info.get("participants", []):
+                response_message += "<b>Leaderboard:</b>\n"
+                for i, entry in enumerate(quiz_info["participants"][:3]):
+                    rank_emoji = ["🥇", "🥈", "🥉"][i] if i < 3 else "🏅"
+                    username = html.escape(
+                        entry.get("username")
+                        or f"User_{entry.get('user_id', 'Unknown')[:4]}"
+                    )
+                    score = entry.get(
+                        "score", "-"
+                    )  # Changed from entry["correct_count"] to entry.get("score", "-")
+                    response_message += (
+                        f"{rank_emoji} {i+1}. @{username} - Score: {score}\n"
+                    )
+            else:
+                response_message += "<i>No participants yet. Be the first!</i>\n"
+
+            response_message += (
+                f"\n➡️ Play this quiz: <code>/playquiz {quiz_id_full}</code>\n"
+            )
+
+        response_message += "<pre>------------------------------</pre>\n"
+        response_message += "\nCreate your own quiz with /createquiz!"
+
+        await safe_send_message(
+            context.bot,
+            update.effective_chat.id,
+            response_message,
+            parse_mode="HTML",
+        )
+
+    except Exception as e:
+        logger.error(
+            f"Error in show_all_active_leaderboards_command: {e}", exc_info=True
+        )
+        await safe_send_message(
+            context.bot,
+            update.effective_chat.id,
+            "Sorry, I couldn't fetch the leaderboards right now. Please try again later.",
+        )
+    finally:
+        session.close()

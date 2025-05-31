@@ -1,3 +1,4 @@
+from typing import Optional
 import uuid
 import logging
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
@@ -5,45 +6,110 @@ from telegram.ext import CallbackContext
 from models.user import User
 from store.database import SessionLocal
 from utils.telegram_helpers import safe_send_message
+from utils.redis_client import RedisClient
 
 logger = logging.getLogger(__name__)
 
 
 async def link_wallet(update: Update, context: CallbackContext):
     """Handler for /linkwallet command - instructs user to link wallet via private message."""
-    # If this is a group chat, direct user to DM
+    user = update.effective_user
+    user_id_str = str(user.id)
+
     if update.effective_chat.type != "private":
-        await safe_send_message(
-            context.bot,
-            update.effective_chat.id,
-            f"@{update.effective_user.username}, please start a private chat with me to link your NEAR wallet securely.",
-        )
+        try:
+            # Inform in group chat
+            await safe_send_message(
+                context.bot,
+                update.effective_chat.id,
+                f"@{user.username}, I'll send you a private message to help you link your NEAR wallet securely.",
+            )
+            # Send DM
+            await safe_send_message(
+                context.bot,
+                user_id_str,  # Send to user's private chat
+                "Let's link your NEAR wallet. Please send me your wallet address (e.g., 'yourname.near').",
+            )
+            # Set user state to wait for wallet address
+            await RedisClient.set_user_data_key(
+                user_id_str, "awaiting", "wallet_address"
+            )
+            logger.info(
+                f"User {user_id_str} (from group chat {update.effective_chat.id}) state set to 'awaiting: wallet_address' in Redis after DM."
+            )
+        except Exception as e:
+            logger.error(
+                f"Failed to send DM or set Redis state for user {user_id_str} from group chat: {e}"
+            )
+            await safe_send_message(
+                context.bot,
+                update.effective_chat.id,
+                f"@{user.username}, I tried to send you a DM, but it failed. Please start a private chat with me to link your wallet.",
+            )
         return
 
     # This is already a private chat, prompt for wallet address
     await safe_send_message(
         context.bot,
         update.effective_chat.id,
-        "Please send me your NEAR wallet address (e.g., 'yourname.near').",
+        "Great. What wallet address would you be linking? Please send me your NEAR wallet address (e.g., 'yourname.near').",  # Changed prompt
     )
     # Set user state to wait for wallet address
-    context.user_data["awaiting"] = "wallet_address"
+    await RedisClient.set_user_data_key(user_id_str, "awaiting", "wallet_address")
+    logger.info(
+        f"User {user_id_str} state attempted to set to 'awaiting: wallet_address' in Redis."
+    )
+
+    # Diagnostic: Immediately try to read back the value
+    read_back_state = await RedisClient.get_user_data_key(user_id_str, "awaiting")
+    logger.info(
+        f"User {user_id_str} diagnostic read back 'awaiting' state from Redis: {read_back_state}"
+    )
 
 
 async def handle_wallet_address(update: Update, context: CallbackContext):
     """Process wallet address from user in private chat."""
-    wallet_address = update.message.text.strip()
+    wallet_address_raw = update.message.text
+    wallet_address = wallet_address_raw.strip()
     user_id = str(update.effective_user.id)
 
+    logger.info(
+        f"Handling wallet address for user {user_id}. Received raw: '{wallet_address_raw}', stripped: '{wallet_address}'"
+    )
+
     try:
-        # Only allow mainnet .near addresses
-        if not wallet_address.endswith(".near") or wallet_address.endswith(".testnet"):
+        if not wallet_address:  # Check if address is empty after stripping
+            logger.warning(
+                f"Empty wallet address received for user {user_id} after stripping."
+            )
             await safe_send_message(
                 context.bot,
                 update.effective_chat.id,
-                "❌ Only mainnet NEAR wallets are allowed. Please provide a wallet address ending with '.near' (not '.testnet').",
+                "⚠️ Wallet address cannot be empty. Please send a valid NEAR wallet address (e.g., 'yourname.near' or 'yourname.testnet').",
             )
             return
+
+        is_near = wallet_address.endswith(".near")
+        is_testnet = wallet_address.endswith(".testnet")
+        # Allow both .near and .testnet addresses
+        validation_fails = not (is_near or is_testnet)
+
+        logger.info(
+            f"For wallet '{wallet_address}': ends_with_near={is_near}, ends_with_testnet={is_testnet}, validation_fails_if_true={validation_fails}"
+        )
+
+        if validation_fails:
+            logger.warning(
+                f"Wallet address validation failed for '{wallet_address}'. Criteria: not (ends_with_near OR ends_with_testnet)."
+            )
+            await safe_send_message(
+                context.bot,
+                update.effective_chat.id,
+                "❌ Invalid wallet address. Please provide a wallet address ending with '.near' or '.testnet'.",
+            )
+            return
+
+        logger.info(f"Wallet address '{wallet_address}' passed validation.")
 
         # Skip the challenge/signature part and directly save the wallet address
         session = SessionLocal()
@@ -59,8 +125,9 @@ async def handle_wallet_address(update: Update, context: CallbackContext):
             session.close()
 
         # Clear awaiting state
-        if "awaiting" in context.user_data:
-            del context.user_data["awaiting"]
+        await RedisClient.delete_user_data_key(user_id, "awaiting")
+        # Invalidate user cache
+        await RedisClient.delete_cached_object(f"user_profile:{user_id}")
 
         # Confirm wallet link to the user
         await safe_send_message(
@@ -88,28 +155,40 @@ async def handle_signature(update: Update, context: CallbackContext):
 
 async def check_wallet_linked(user_id: str) -> bool:
     """Check if a user has linked their NEAR wallet."""
-    try:
-        session = SessionLocal()
-        try:
-            user = session.query(User).filter(User.id == user_id).first()
-            return user is not None and user.wallet_address is not None
-        finally:
-            session.close()
-    except Exception as e:
-        logger.error(f"Error checking wallet linkage: {e}", exc_info=True)
-        return False  # Safer to return False in case of error
+    user_profile = await get_user_profile(user_id)
+    return user_profile is not None and user_profile.get("wallet_address") is not None
 
 
 async def get_user_wallet(user_id: str) -> str | None:
     """Retrieve the wallet address for a given user_id."""
+    user_profile = await get_user_profile(user_id)
+    return user_profile.get("wallet_address") if user_profile else None
+
+
+async def get_user_profile(user_id: str) -> Optional[dict]:
+    """Retrieve user profile, from cache if available, otherwise from DB."""
+    cache_key = f"user_profile:{user_id}"
+
+    cached_user = await RedisClient.get_cached_object(cache_key)
+    if cached_user:
+        logger.info(f"User profile for {user_id} found in cache.")
+        return cached_user
+
+    logger.info(f"User profile for {user_id} not in cache. Fetching from DB.")
     session = SessionLocal()
     try:
         user = session.query(User).filter(User.id == str(user_id)).first()
-        if user and user.wallet_address:
-            return user.wallet_address
+        if user:
+            user_data = {
+                "id": user.id,
+                "wallet_address": user.wallet_address,
+                "linked_at": user.linked_at.isoformat() if user.linked_at else None,
+            }
+            await RedisClient.set_cached_object(cache_key, user_data)
+            return user_data
         return None
     except Exception as e:
-        logger.error(f"Error getting user wallet for {user_id}: {e}", exc_info=True)
+        logger.error(f"Error getting user profile for {user_id}: {e}", exc_info=True)
         return None
     finally:
         session.close()
@@ -126,6 +205,8 @@ async def set_user_wallet(user_id: str, wallet_address: str) -> bool:
         else:
             user.wallet_address = wallet_address
         session.commit()
+        # Invalidate cache
+        await RedisClient.delete_cached_object(f"user_profile:{user_id}")
         return True
     except Exception as e:
         logger.error(f"Error setting user wallet for {user_id}: {e}", exc_info=True)
@@ -143,11 +224,13 @@ async def remove_user_wallet(user_id: str) -> bool:
         if user and user.wallet_address:
             user.wallet_address = None
             session.commit()
+            # Invalidate cache
+            await RedisClient.delete_cached_object(f"user_profile:{user_id}")
             return True
         elif not user or not user.wallet_address:
             # If user doesn't exist or no wallet is linked, consider it a success (idempotency)
             return True
-        return False  # Should not be reached if logic is correct
+        return False
     except Exception as e:
         logger.error(f"Error removing user wallet for {user_id}: {e}", exc_info=True)
         session.rollback()

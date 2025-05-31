@@ -15,6 +15,7 @@ logging.basicConfig(
 from utils.config import Config
 from bot.telegram_bot import TelegramBot
 from store.database import init_db, migrate_schema
+from utils.redis_client import RedisClient  # Added import
 
 logger = logging.getLogger(__name__)
 
@@ -28,12 +29,31 @@ async def main():
 
     # # Try to migrate schema if using PostgreSQL
     # if "postgresql" in Config.DATABASE_URL or "postgres" in Config.DATABASE_URL:
-    #     logger.info("Attempting to migrate database schema for PostgreSQL...")
-    #     migrate_schema()
+        #     logger.info("Attempting to migrate database schema for PostgreSQL...")
+        # migrate_schema()
 
     # Initialize database tables if they don't exist
-    init_db()
+    # init_db()
 
+    # Try to connect to Redis
+    try:
+        redis_instance = await RedisClient.get_instance()
+        if redis_instance:
+            logger.info("Successfully connected to Redis and pinged the server.")
+        else:
+            # This case should ideally be handled by an exception from get_instance if connection fails
+            logger.error(
+                "Failed to get Redis instance, but no exception was raised. Check RedisClient logic."
+            )
+            # Depending on how critical Redis is, you might want to exit or proceed with a warning.
+            # For now, we'll log an error and continue.
+    except Exception as e:
+        logger.error(
+            f"Failed to connect to Redis: {e}. The application will continue without Redis.",
+            exc_info=True,
+        )
+        # Depending on the application's requirements, you might want to sys.exit(1) here
+        # if Redis is critical for operation.
     # Start telegram bot
     # Check if WEBHOOK_URL is defined and not empty in Config
     if hasattr(Config, "WEBHOOK_URL") and Config.WEBHOOK_URL:
@@ -106,6 +126,19 @@ if __name__ == "__main__":
                 loop.run_until_complete(bot_instance.stop())
             except Exception as e_stop:
                 logger.error(f"Error during bot stop: {e_stop}", exc_info=True)
+
+        # Close Redis connection
+        logger.info("Attempting to gracefully close Redis connection...")
+        try:
+            # Ensure loop is available for RedisClient.close()
+            if loop.is_closed():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            loop.run_until_complete(RedisClient.close())
+        except Exception as e_redis_close:
+            logger.error(
+                f"Error closing Redis connection: {e_redis_close}", exc_info=True
+            )
 
         # Cancel the main task if it's still pending (e.g., KeyboardInterrupt)
         if main_task and not main_task.done():
