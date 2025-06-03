@@ -153,38 +153,6 @@ Set `WEBHOOK_URL` in your `.env` file and run:
 python src/main.py
 ```
 
-## 🐳 Docker Deployment
-
-### Docker Compose (Recommended)
-
-1. **Configure environment**:
-
-   ```bash
-   cp .env.example .env
-   # Edit .env with your configuration
-   ```
-
-2. **Start services**:
-   ```bash
-   docker-compose up -d
-   ```
-
-### Standalone Docker
-
-1. **Build image**:
-
-   ```bash
-   docker build -t mental-maze-bot .
-   ```
-
-2. **Run container**:
-   ```bash
-   docker run -d \
-     --name mental-maze-bot \
-     --env-file .env \
-     -p 8443:8443 \
-     mental-maze-bot
-   ```
 
 ## 📋 Command Reference
 
