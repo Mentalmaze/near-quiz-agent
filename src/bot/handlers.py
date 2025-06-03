@@ -1088,6 +1088,12 @@ async def show_all_active_leaderboards_command(
                     end_time_dt = datetime.fromisoformat(
                         quiz_info["end_time"].replace("Z", "+00:00")
                     )
+                    # Ensure timezone-aware datetime for correct comparisons
+                    if (
+                        end_time_dt.tzinfo is None
+                        or end_time_dt.tzinfo.utcoffset(end_time_dt) is None
+                    ):
+                        end_time_dt = end_time_dt.replace(tzinfo=timezone.utc)
                     time_left_str = "Ended"
                     now_utc = datetime.now(timezone.utc)
                     if end_time_dt > now_utc:

@@ -18,7 +18,8 @@ class RedisClient:
                 cls._instance = redis.Redis(
                     host=Config.REDIS_HOST,
                     port=Config.REDIS_PORT,
-                    db=Config.REDIS_DB,
+                    ssl=Config.REDIS_SSL,
+                    # db=Config.REDIS_DB,
                     password=Config.REDIS_PASSWORD,
                     decode_responses=False,
                 )
