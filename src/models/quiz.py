@@ -7,6 +7,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     ForeignKey,
+    Index,
 )
 from sqlalchemy.orm import relationship
 import enum
@@ -78,7 +79,28 @@ class QuizAnswer(Base):
         default="False",
         index=True,  # Explicitly default to "False" as string
     )
-    answered_at = Column(DateTime, default=datetime.datetime.utcnow)
+    answered_at = Column(
+        DateTime, default=datetime.datetime.utcnow, index=True
+    )  # Add index for time-based queries
+    question_index = Column(
+        BigInteger, nullable=True, index=True
+    )  # Track which question this answers
+
+    # Add composite indexes for common query patterns
+    __table_args__ = (
+        # Prevent duplicate answers for same user/quiz/question
+        Index(
+            "idx_unique_user_quiz_question",
+            "user_id",
+            "quiz_id",
+            "question_index",
+            unique=True,
+        ),
+        # Optimize leaderboard queries
+        Index("idx_quiz_correct_time", "quiz_id", "is_correct", "answered_at"),
+        # Optimize user participation checks
+        Index("idx_user_quiz_lookup", "user_id", "quiz_id"),
+    )
 
     quiz = relationship("Quiz", back_populates="answers")  # Add relationship
     user = relationship(
