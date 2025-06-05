@@ -59,7 +59,7 @@ class TelegramBot:
 
         try:
             if update:
-                # If we have an update object, we can respond to the user
+        
                 if isinstance(error, TimedOut):
                     logger.warning(f"Timeout error when processing update {update}")
                     # Prompt user to retry when a timeout occurs
