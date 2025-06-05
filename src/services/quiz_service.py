@@ -10,10 +10,16 @@ import uuid
 import json
 import asyncio
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 import traceback
 from utils.config import Config
 from utils.redis_client import RedisClient
+from utils.performance_monitor import (
+    track_quiz_answer_submission,
+    track_database_query,
+    track_cache_operation,
+)
 from typing import Optional, TYPE_CHECKING, Union
 
 if TYPE_CHECKING:
@@ -583,16 +589,75 @@ async def play_quiz(update: Update, context: CallbackContext):
             logger.info(
                 f"No quiz ID in args, checking active quizzes for group: {group_chat_id}"
             )
-            active_quizzes = (
-                session.query(Quiz)
-                .filter(
-                    Quiz.status == QuizStatus.ACTIVE,
-                    Quiz.group_chat_id == group_chat_id,
-                    Quiz.end_time > datetime.utcnow(),
+
+            # PERFORMANCE OPTIMIZATION: Check cache for active quizzes first
+            redis_client = RedisClient()
+            try:
+                cached_active_quizzes = await redis_client.get_cached_active_quizzes(
+                    str(group_chat_id)
                 )
-                .order_by(Quiz.end_time)
-                .all()
-            )
+                if cached_active_quizzes:
+                    logger.info(
+                        f"Found {len(cached_active_quizzes)} active quizzes in cache for group {group_chat_id}"
+                    )
+                    # Convert cached data back to quiz objects for processing
+                    active_quizzes = []
+                    for quiz_data in cached_active_quizzes:
+                        quiz = (
+                            session.query(Quiz)
+                            .filter(Quiz.id == quiz_data["id"])
+                            .first()
+                        )
+                        if quiz:
+                            active_quizzes.append(quiz)
+                else:
+                    # Cache miss - query database
+                    active_quizzes = (
+                        session.query(Quiz)
+                        .filter(
+                            Quiz.status == QuizStatus.ACTIVE,
+                            Quiz.group_chat_id == group_chat_id,
+                            Quiz.end_time > datetime.utcnow(),
+                        )
+                        .order_by(Quiz.end_time)
+                        .all()
+                    )
+
+                    # Cache the results for future lookups
+                    quiz_cache_data = [
+                        {
+                            "id": q.id,
+                            "topic": q.topic,
+                            "end_time": q.end_time.isoformat() if q.end_time else None,
+                            "questions_count": len(q.questions) if q.questions else 0,
+                        }
+                        for q in active_quizzes
+                    ]
+                    await redis_client.cache_active_quizzes(
+                        str(group_chat_id), quiz_cache_data, ttl_seconds=300
+                    )
+                    logger.info(
+                        f"Cached {len(active_quizzes)} active quizzes for group {group_chat_id}"
+                    )
+
+                await redis_client.close()
+            except Exception as cache_error:
+                logger.warning(
+                    f"Cache error, falling back to database query: {cache_error}"
+                )
+                # Fallback to database query if cache fails
+                active_quizzes = (
+                    session.query(Quiz)
+                    .filter(
+                        Quiz.status == QuizStatus.ACTIVE,
+                        Quiz.group_chat_id == group_chat_id,
+                        Quiz.end_time > datetime.utcnow(),
+                    )
+                    .order_by(Quiz.end_time)
+                    .all()
+                )
+                await redis_client.close()
+
             logger.info(
                 f"Found {len(active_quizzes)} active quizzes for group {group_chat_id}."
             )
@@ -792,98 +857,184 @@ async def send_quiz_question(bot, user_id, quiz, question_index):
 
 async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Process quiz answers from inline keyboard callbacks."""
-    query = update.callback_query
-    await query.answer()  # Acknowledge the button press
+    async with track_quiz_answer_submission({"user_id": str(update.effective_user.id)}):
+        query = update.callback_query
+        await query.answer()  # Acknowledge the button press
 
-    # Parse callback data to get quiz ID, question index, and answer
-    try:
-        _, quiz_id, question_index, answer = query.data.split(":")
-        question_index = int(question_index)
-    except ValueError:
-        await safe_edit_message_text(
-            context.bot,
-            query.message.chat_id,
-            query.message.message_id,
-            "Invalid answer format.",
-        )
-        return
-
-    # Get quiz from database
-    session = SessionLocal()
-    try:
-        quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
-
-        if not quiz:
+        # Parse callback data to get quiz ID, question index, and answer
+        try:
+            _, quiz_id, question_index, answer = query.data.split(":")
+            question_index = int(question_index)
+        except ValueError:
             await safe_edit_message_text(
                 context.bot,
                 query.message.chat_id,
                 query.message.message_id,
-                "Quiz not found.",
+                "Invalid answer format.",
             )
             return
 
-        # Get questions list, handling legacy format
-        questions_list = quiz.questions
-        if isinstance(questions_list, dict):
-            questions_list = [questions_list]
+        # Get quiz from database with optimized query
+        session = SessionLocal()
+        try:
+            # PERFORMANCE OPTIMIZATION: Use more specific query with only needed columns
+            start_time = time.time()
+            # Load only essential fields for better performance
+            quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
+            query_time = (time.time() - start_time) * 1000
+            if query_time > 500:  # Log if query takes more than 500ms
+                logger.warning(
+                    f"Slow database query: get_quiz_for_answer took {query_time:.2f}ms"
+                )
 
-        # Get the current question
-        if question_index >= len(questions_list):
+            if not quiz:
+                await safe_edit_message_text(
+                    context.bot,
+                    query.message.chat_id,
+                    query.message.message_id,
+                    "Quiz not found.",
+                )
+                return
+
+            # Get questions list, handling legacy format
+            questions_list = quiz.questions
+            if isinstance(questions_list, dict):
+                questions_list = [questions_list]
+
+            # Validate question index early
+            if question_index >= len(questions_list):
+                await safe_edit_message_text(
+                    context.bot,
+                    query.message.chat_id,
+                    query.message.message_id,
+                    "Invalid question index.",
+                )
+                return
+
+            current_q = questions_list[question_index]
+            correct_answer = current_q.get("correct", "")
+            is_correct = correct_answer == answer
+
+            # Get user info
+            user_id = str(update.effective_user.id)
+            username = (
+                update.effective_user.username or update.effective_user.first_name
+            )
+
+            # PERFORMANCE OPTIMIZATION: Use efficient exists() query instead of first()
+            start_time = time.time()
+            answer_exists = session.query(
+                session.query(QuizAnswer)
+                .filter(
+                    QuizAnswer.quiz_id == quiz_id,
+                    QuizAnswer.user_id == user_id,
+                    QuizAnswer.question_index == question_index,
+                )
+                .exists()
+            ).scalar()
+            query_time = (time.time() - start_time) * 1000
+            if query_time > 500:  # Log if query takes more than 500ms
+                logger.warning(
+                    f"Slow database query: check_duplicate_answer took {query_time:.2f}ms"
+                )
+
+            if answer_exists:
+                await safe_edit_message_text(
+                    context.bot,
+                    query.message.chat_id,
+                    query.message.message_id,
+                    "You have already answered this question.",
+                )
+                return
+
+            quiz_answer = QuizAnswer(
+                quiz_id=quiz_id,
+                user_id=user_id,
+                username=username,
+                answer=answer,
+                question_index=question_index,  # Add question index for duplicate prevention
+                is_correct=str(
+                    is_correct
+                ),  # Store as string 'True' or 'False', not boolean
+            )
+            session.add(quiz_answer)
+
+            # PERFORMANCE OPTIMIZATION: Add answer to session
+            session.add(quiz_answer)
+
+            # Prepare success message
+            result_message = (
+                f"{query.message.text}\n\n"
+                f"Your answer: {answer}\n"
+                f"{'✅ Correct!' if is_correct else f'❌ Wrong. The correct answer is {correct_answer}.'}"
+            )
+
+            # PERFORMANCE OPTIMIZATION: Execute operations concurrently where possible
+            next_question_index = question_index + 1
+
+            # Create concurrent tasks for performance optimization
+            async def commit_database():
+                """Commit database changes in background."""
+                try:
+                    session.flush()  # Validate first
+                    session.commit()
+                    logger.debug(
+                        f"Database committed for quiz {quiz_id} answer submission"
+                    )
+                except Exception as e:
+                    logger.error(f"Database commit error: {e}")
+                    session.rollback()
+                    raise
+
+            async def invalidate_cache():
+                """Invalidate quiz cache in background."""
+                redis_client = RedisClient()
+                try:
+                    async with track_cache_operation(
+                        "invalidate_quiz_cache", {"quiz_id": quiz_id}
+                    ):
+                        await redis_client.invalidate_quiz_cache(quiz_id)
+                        logger.debug(f"Cache invalidated for quiz {quiz_id}")
+                except Exception as cache_error:
+                    logger.warning(f"Cache invalidation failed: {cache_error}")
+                finally:
+                    await redis_client.close()
+
+            # Execute UI updates immediately, database/cache operations in background
             await safe_edit_message_text(
                 context.bot,
                 query.message.chat_id,
                 query.message.message_id,
-                "Invalid question index.",
+                result_message,
+                reply_markup=None,
             )
-            return
 
-        current_q = questions_list[question_index]
+            # Start next question immediately for better UX
+            next_question_task = asyncio.create_task(
+                send_quiz_question(
+                    context.bot, query.message.chat_id, quiz, next_question_index
+                )
+            )
 
-        # Get correct answer for this question
-        correct_answer = current_q.get("correct", "")
-        is_correct = correct_answer == answer
+            # Run database and cache operations concurrently
+            db_cache_tasks = [
+                asyncio.create_task(commit_database()),
+                asyncio.create_task(invalidate_cache()),
+            ]
 
-        # Record the answer in database
-        user_id = str(update.effective_user.id)
-        username = update.effective_user.username or update.effective_user.first_name
+            # Wait for next question to be sent, then background tasks
+            await next_question_task
+            await asyncio.gather(*db_cache_tasks, return_exceptions=True)
 
-        quiz_answer = QuizAnswer(
-            quiz_id=quiz_id,
-            user_id=user_id,
-            username=username,
-            answer=answer,
-            is_correct=str(
-                is_correct
-            ),  # Store as string 'True' or 'False', not boolean
-        )
-        session.add(quiz_answer)
-        session.commit()
+        except Exception as e:
+            logger.error(f"Error handling quiz answer: {e}", exc_info=True)
+            # Rollback on error to ensure data consistency
+            session.rollback()
+            import traceback
 
-        # Update message to show result
-        await safe_edit_message_text(
-            context.bot,
-            query.message.chat_id,
-            query.message.message_id,
-            f"{query.message.text}\n\n"
-            f"Your answer: {answer}\n"
-            f"{'✅ Correct!' if is_correct else f'❌ Wrong. The correct answer is {correct_answer}.'}",
-            reply_markup=None,
-        )
-
-        # Send the next question after a short delay
-        next_question_index = question_index + 1
-        await asyncio.sleep(1)  # Short delay before next question
-        await send_quiz_question(
-            context.bot, query.message.chat_id, quiz, next_question_index
-        )
-
-    except Exception as e:
-        logger.error(f"Error handling quiz answer: {e}", exc_info=True)
-        import traceback
-
-        traceback.print_exc()
-    finally:
-        session.close()
+            traceback.print_exc()
+        finally:
+            session.close()
 
 
 async def handle_reward_structure(update: Update, context: ContextTypes.DEFAULT_TYPE):

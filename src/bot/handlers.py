@@ -757,7 +757,7 @@ async def private_message_handler(update: Update, context: CallbackContext):
                 )
                 if quiz and quiz.group_chat_id:
                     # ... (rest of the announcement logic remains the same)
-                    announce_text = "@all \n"
+                    announce_text = "@everyone \n"
                     announce_text += f"📣 New quiz '**{_escape_markdown_v2_specials(quiz.topic)}**' is now active! 🎯\n\n"
 
                     num_questions = len(quiz.questions) if quiz.questions else "N/A"
@@ -799,7 +799,7 @@ async def private_message_handler(update: Update, context: CallbackContext):
                         logger.error(
                             f"Failed to send announcement with MarkdownV2: {e}. Sending as plain text."
                         )
-                        plain_announce_text = "@all \n"
+                        plain_announce_text = "@everyone \n"
                         plain_announce_text += (
                             f"New quiz '{quiz.topic}' is now active! \n"
                         )

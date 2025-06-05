@@ -112,6 +112,11 @@ class RedisClient:
             )
             return False
 
+    @classmethod
+    async def delete_key(cls, key: str) -> bool:
+        """Alias for delete_value method for consistency."""
+        return await cls.delete_value(key)
+
     # User data specific methods (all need to be async and await calls)
     USER_DATA_PREFIX = "user_data:"
     USER_DATA_TTL = 3600 * 24  # 24 hours
@@ -252,6 +257,124 @@ class RedisClient:
                 logger.error(f"Error closing Async Redis client connection: {e}")
             finally:
                 cls._instance = None
+
+    # PERFORMANCE OPTIMIZATION: Quiz-specific caching methods
+    QUIZ_CACHE_PREFIX = "quiz_cache:"
+    QUIZ_DETAILS_PREFIX = "quiz_details:"
+    QUIZ_PARTICIPANTS_PREFIX = "quiz_participants:"
+    QUIZ_LEADERBOARD_PREFIX = "quiz_leaderboard:"
+    ACTIVE_QUIZZES_PREFIX = "active_quizzes:"
+
+    @classmethod
+    async def cache_quiz_details(
+        cls, quiz_id: str, quiz_data: dict, ttl_seconds: int = 3600
+    ) -> bool:
+        """Cache quiz details with optimized TTL based on quiz state."""
+        key = f"{cls.QUIZ_DETAILS_PREFIX}{quiz_id}"
+        return await cls.set_value(key, quiz_data, ttl_seconds=ttl_seconds)
+
+    @classmethod
+    async def get_cached_quiz_details(cls, quiz_id: str) -> Optional[dict]:
+        """Retrieve cached quiz details."""
+        key = f"{cls.QUIZ_DETAILS_PREFIX}{quiz_id}"
+        return await cls.get_value(key)
+
+    @classmethod
+    async def cache_quiz_participants(
+        cls, quiz_id: str, participants_data: list, ttl_seconds: int = 300
+    ) -> bool:
+        """Cache quiz participants list with shorter TTL for real-time updates."""
+        key = f"{cls.QUIZ_PARTICIPANTS_PREFIX}{quiz_id}"
+        return await cls.set_value(key, participants_data, ttl_seconds=ttl_seconds)
+
+    @classmethod
+    async def get_cached_quiz_participants(cls, quiz_id: str) -> Optional[list]:
+        """Retrieve cached quiz participants."""
+        key = f"{cls.QUIZ_PARTICIPANTS_PREFIX}{quiz_id}"
+        return await cls.get_value(key)
+
+    @classmethod
+    async def cache_quiz_leaderboard(
+        cls, quiz_id: str, leaderboard_data: dict, ttl_seconds: int = 180
+    ) -> bool:
+        """Cache quiz leaderboard with very short TTL for real-time competition."""
+        key = f"{cls.QUIZ_LEADERBOARD_PREFIX}{quiz_id}"
+        return await cls.set_value(key, leaderboard_data, ttl_seconds=ttl_seconds)
+
+    @classmethod
+    async def get_cached_quiz_leaderboard(cls, quiz_id: str) -> Optional[dict]:
+        """Retrieve cached quiz leaderboard."""
+        key = f"{cls.QUIZ_LEADERBOARD_PREFIX}{quiz_id}"
+        return await cls.get_value(key)
+
+    @classmethod
+    async def cache_active_quizzes(
+        cls, group_chat_id: str, active_quizzes: list, ttl_seconds: int = 600
+    ) -> bool:
+        """Cache active quizzes for a group chat."""
+        key = f"{cls.ACTIVE_QUIZZES_PREFIX}{group_chat_id}"
+        return await cls.set_value(key, active_quizzes, ttl_seconds=ttl_seconds)
+
+    @classmethod
+    async def get_cached_active_quizzes(cls, group_chat_id: str) -> Optional[list]:
+        """Retrieve cached active quizzes for a group chat."""
+        key = f"{cls.ACTIVE_QUIZZES_PREFIX}{group_chat_id}"
+        return await cls.get_value(key)
+
+    @classmethod
+    async def invalidate_quiz_cache(cls, quiz_id: str) -> bool:
+        """Invalidate all cached data related to a specific quiz using batch delete."""
+        keys_to_delete = [
+            f"{cls.QUIZ_DETAILS_PREFIX}{quiz_id}",
+            f"{cls.QUIZ_PARTICIPANTS_PREFIX}{quiz_id}",
+            f"{cls.QUIZ_LEADERBOARD_PREFIX}{quiz_id}",
+        ]
+
+        try:
+            r = await cls.get_instance()
+            if r is None:
+                logger.error("Redis client not available for batch cache invalidation")
+                return False
+
+            # Use Redis pipeline for batch deletion to reduce round trips
+            pipe = r.pipeline()
+            for key in keys_to_delete:
+                pipe.delete(key)
+            results = await pipe.execute()
+
+            success_count = sum(1 for result in results if result > 0)
+            logger.info(
+                f"Batch invalidated {success_count}/{len(keys_to_delete)} cache keys for quiz {quiz_id}"
+            )
+            return success_count > 0
+
+        except Exception as e:
+            logger.error(f"Error in batch cache invalidation for quiz {quiz_id}: {e}")
+            # Fallback to individual deletion if batch fails
+            success_count = 0
+            for key in keys_to_delete:
+                if await cls.delete_value(key):
+                    success_count += 1
+
+            logger.info(
+                f"Fallback invalidated {success_count}/{len(keys_to_delete)} cache keys for quiz {quiz_id}"
+            )
+            return success_count > 0
+
+    @classmethod
+    async def invalidate_group_quiz_cache(cls, group_chat_id: str) -> bool:
+        """Invalidate active quizzes cache for a group."""
+        key = f"{cls.ACTIVE_QUIZZES_PREFIX}{group_chat_id}"
+        return await cls.delete_value(key)
+
+    @classmethod
+    async def batch_invalidate_quiz_caches(cls, quiz_ids: list) -> int:
+        """Batch invalidate multiple quiz caches for efficiency."""
+        invalidated_count = 0
+        for quiz_id in quiz_ids:
+            if await cls.invalidate_quiz_cache(quiz_id):
+                invalidated_count += 1
+        return invalidated_count
 
 
 # Example usage (if __name__ == "__main__"):
