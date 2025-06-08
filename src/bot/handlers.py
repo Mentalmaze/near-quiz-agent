@@ -841,12 +841,6 @@ async def private_message_handler(update: Update, context: CallbackContext):
                                         seconds=q.duration_seconds
                                     )
                                 session2.commit()
-                                # Schedule auto distribution
-                                await schedule_auto_distribution(
-                                    context.application,
-                                    q.id,
-                                    q.duration_seconds or 0,
-                                )
                         finally:
                             session2.close()
             except Exception as e:
