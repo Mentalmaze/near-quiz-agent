@@ -620,6 +620,11 @@ class BlockchainMonitor:
         self, tx_hash: str, quiz_id: str, expected_sender: Optional[str] = None
     ) -> bool:
         """Verify a transaction by its hash, optionally checking the sender."""
+        # 1. Strict validation of hash format
+        if not re.match(r'^[1-9A-HJ-NP-Za-km-z]{43,45}$', tx_hash):
+            logger.warning(f"Invalid transaction hash format: {tx_hash}")
+            return False
+
         if not self.near_account:
             logger.error("Cannot verify transaction - NEAR account not initialized")
             return False
@@ -630,7 +635,13 @@ class BlockchainMonitor:
 
         with get_db() as session:
             quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
-            if not quiz or quiz.status != QuizStatus.FUNDING:
+            if not quiz:
+                logger.warning(f"Verification failed: Quiz {quiz_id} not found.")
+                return False
+            if quiz.status != QuizStatus.FUNDING:
+                logger.warning(
+                    f"Verification failed: Quiz {quiz_id} is not in FUNDING state (current: {quiz.status})."
+                )
                 return False
             # Store all required attributes while session is open
             quiz_data = {
@@ -659,32 +670,11 @@ class BlockchainMonitor:
                 return False
 
         try:
-            # call NEAR JSON-RPC tx method
-            payload = {
-                "jsonrpc": "2.0",
-                "id": "verify",
-                "method": "EXPERIMENTAL_tx_status",
-                "params": {
-                    "tx_hash": tx_hash,
-                    "sender_account_id": quiz_data["deposit_address"],
-                    "wait_until": "FINAL",
-                },
-            }
+            # 2. Use the correct, robust RPC fetcher
+            result = await self._fetch_transaction_status_rpc(
+                tx_hash, quiz_data["deposit_address"]
+            )
 
-            try:
-                data = await self._make_rpc_request(payload)
-            except (httpx.TimeoutException, httpx.ReadTimeout) as e:
-                logger.warning(
-                    f"Timeout while verifying transaction {tx_hash}. Error: {str(e)}"
-                )
-                return False
-            except httpx.HTTPError as e:
-                logger.error(
-                    f"HTTP error while verifying transaction {tx_hash}. Error: {str(e)}"
-                )
-                return False
-
-            result = data.get("result")
             if not result or "status" not in result:
                 logger.warning(f"RPC returned no result or status for tx {tx_hash}")
                 return False
@@ -692,31 +682,40 @@ class BlockchainMonitor:
             status = result["status"]
             if isinstance(status, dict):
                 if "SuccessValue" not in status and "success_value" not in status:
+                    logger.warning(f"Transaction {tx_hash} was not successful. Status: {status}")
                     return False
             elif isinstance(status, str) and "SuccessValue" not in status:
+                logger.warning(f"Transaction {tx_hash} was not successful. Status: {status}")
                 return False
 
             tx = result.get("transaction", {})
             if tx.get("receiver_id") != quiz_data["deposit_address"]:
+                logger.warning(
+                    f"Transaction receiver ({tx.get('receiver_id')}) does not match deposit address ({quiz_data['deposit_address']})."
+                )
                 return False
 
-            # Enforce transfer window: only accept transactions after quiz creation and within 30 minutes
-            block_timestamp_ns = result.get("block_timestamp") or result.get(
+            # 3. Enforce stricter transfer window: only accept transactions after quiz creation and within 15 minutes
+            block_timestamp_ns = result.get("transaction_outcome", {}).get("block_hash")
+            if not block_timestamp_ns:
+                 block_timestamp_ns = result.get("block_timestamp") or result.get(
                 "block_timestamp_nanosec"
             )
+
             if block_timestamp_ns:
                 block_timestamp = datetime.utcfromtimestamp(
                     int(block_timestamp_ns) / 1e9
                 )
                 quiz_created_at = quiz_data.get("created_at")
                 if quiz_created_at:
-                    # Only accept if transaction is after quiz creation and within 30 minutes
-                    if (
-                        block_timestamp < quiz_created_at
-                        or block_timestamp > quiz_created_at + timedelta(minutes=30)
+                    time_limit = timedelta(minutes=15)
+                    # Only accept if transaction is after quiz creation and within 15 minutes
+                    if not (
+                        quiz_created_at <= block_timestamp <= (quiz_created_at + time_limit)
                     ):
                         logger.warning(
-                            f"Transaction {tx_hash} is outside the allowed window. Block time: {block_timestamp}, Quiz created: {quiz_created_at}"
+                            f"Transaction {tx_hash} is outside the allowed window. "
+                            f"Block time: {block_timestamp}, Quiz created: {quiz_created_at}, Limit: {time_limit}"
                         )
                         return False
 
@@ -734,6 +733,9 @@ class BlockchainMonitor:
                 # mark active and announce in new session with retry logic
                 with get_db() as session:
                     quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
+                    if quiz.status != QuizStatus.FUNDING:
+                        logger.warning(f"Quiz {quiz_id} is no longer in FUNDING state, aborting activation.")
+                        return False
                     quiz.status = QuizStatus.ACTIVE
                     quiz.payment_transaction_hash = tx_hash
                     session.commit()
@@ -749,7 +751,11 @@ class BlockchainMonitor:
                         ),
                     )
                 return True
-            return False
+            else:
+                logger.warning(
+                    f"Transaction amount {total_yocto / NEAR} NEAR is less than required {required_amount_with_fee} NEAR."
+                )
+                return False
         except Exception as e:
             logger.error(f"Error verifying transaction {tx_hash}: {e}", exc_info=True)
             return False
