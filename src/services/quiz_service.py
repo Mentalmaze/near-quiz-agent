@@ -22,6 +22,7 @@ from utils.performance_monitor import (
 )
 from typing import Optional, TYPE_CHECKING, Union, Dict, Tuple
 import random
+from sqlalchemy.exc import IntegrityError
 
 if TYPE_CHECKING:
     from telegram.ext import Application  # Forward reference for type hinting
@@ -440,7 +441,7 @@ async def save_quiz_reward_details(
 
 async def save_quiz_payment_hash(
     quiz_id: str, payment_hash: str, application: Optional["Application"]
-) -> bool:
+) -> tuple[bool, str]:
     """Saves the payment transaction hash for a quiz and updates its status."""
     session = SessionLocal()
     redis_client = RedisClient()
@@ -450,7 +451,7 @@ async def save_quiz_payment_hash(
             logger.error(
                 f"Quiz with ID {quiz_id} not found when trying to save payment hash."
             )
-            return False
+            return False, "Quiz not found."
 
         quiz.payment_transaction_hash = payment_hash
 
@@ -501,8 +502,17 @@ async def save_quiz_payment_hash(
             f"Successfully saved payment hash {payment_hash} for quiz {quiz_id}."
         )
         await redis_client.delete_cached_object(f"quiz_details:{quiz_id}")
-        await redis_client.close()
-        return True
+        return True, "Quiz activated successfully!"
+    except IntegrityError as e:
+        logger.warning(
+            f"IntegrityError saving payment hash for quiz {quiz_id}: duplicate hash {payment_hash}. Error: {e}"
+        )
+        session.rollback()
+        # Reject any reuse of the same transaction hash
+        return (
+            False,
+            "This transaction hash has already been used. Please use a different one.",
+        )
     except AttributeError as ae:
         logger.error(
             f"AttributeError in save_quiz_payment_hash for quiz {quiz_id}: {ae}",
@@ -516,15 +526,15 @@ async def save_quiz_payment_hash(
             )
         session.rollback()
         await redis_client.close()
-        return False
+        return False, "An unexpected error occurred while saving the payment hash."
     except Exception as e:
         logger.error(
             f"Error saving payment hash for quiz {quiz_id}: {e}", exc_info=True
         )
         session.rollback()
-        await redis_client.close()
-        return False
+        return False, "An unexpected error occurred while saving the payment hash."
     finally:
+        await redis_client.close()
         session.close()
 
 
@@ -904,18 +914,18 @@ async def send_quiz_question(
     message_text_parts.append(f"\n{question_text}\n")
 
     keyboard = []
-    # ANTI-CHEAT: Shuffle answer options
-    option_items = list(options.items())
-    random.shuffle(option_items)
-
-    for key, value in option_items:
-        message_text_parts.append(f"{key}) {value}")
-        # Include question index in callback data to track progress
+    # ANTI-CHEAT: Shuffle only answer values, keep labels in order
+    labels = sorted(options.keys())
+    values = list(options.values())
+    random.shuffle(values)
+    for label, value in zip(labels, values):
+        message_text_parts.append(f"{label}) {value}")
+        # Include question index and label in callback data
         keyboard.append(
             [
                 InlineKeyboardButton(
-                    f"{key}",  # Button text is now just the option key (A, B, C, etc.)
-                    callback_data=f"quiz:{quiz.id}:{question_index}:{key}",
+                    label,
+                    callback_data=f"quiz:{quiz.id}:{question_index}:{label}",
                 )
             ]
         )
@@ -1376,18 +1386,18 @@ async def handle_transaction_hash(update: Update, context: CallbackContext):
             await redis_client.delete_user_data_key(user_id, "awaiting")
             return
 
+        # This now returns a tuple: (bool, str)
         success, message = await blockchain_monitor.verify_transaction_by_hash(
-            tx_hash, quiz_id
+            tx_hash, quiz_id, user_id
         )
 
         if success:
-            await safe_send_message(
-                context.bot,
-                update.effective_chat.id,
-                "✅ Transaction verified successfully! Your quiz is now active and ready to play.",
-            )
             # The announcement to the group is now handled within verify_transaction_by_hash
             await redis_client.delete_user_data_key(user_id, "awaiting")
+            # The success message is now returned from verify_transaction_by_hash
+            await safe_send_message(
+                context.bot, update.effective_chat.id, f"✅ {message}"
+            )
         else:
             # Provide the specific error message to the user
             await safe_send_message(

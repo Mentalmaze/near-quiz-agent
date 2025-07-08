@@ -22,6 +22,7 @@ from tenacity import (
     retry_if_exception_type,
 )
 import re
+from sqlalchemy.exc import IntegrityError
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,53 @@ class BlockchainMonitor:
         except Exception as e:
             logger.error(f"Failed to initialize NEAR account: {e}")
             traceback.print_exc()
+
+    @retry(
+        retry=retry_if_exception_type((httpx.ReadTimeout, httpx.ConnectTimeout)),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+    )
+    async def _fetch_transaction_details_rpc(
+        self, tx_hash: str, sender_account_id: str
+    ) -> Dict[str, Any]:
+        """
+        Fetches transaction details from NEAR RPC using the 'tx' endpoint.
+        This is more reliable as it doesn't depend on knowing the sender beforehand.
+
+        Args:
+            tx_hash: The transaction hash to verify.
+            sender_account_id: The account ID of the transaction initiator.
+
+        Returns:
+            A dictionary containing the transaction details.
+        """
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            payload = {
+                "jsonrpc": "2.0",
+                "id": "dontcare",
+                "method": "tx",
+                "params": [tx_hash, sender_account_id],
+            }
+            try:
+                resp = await client.post(Config.NEAR_RPC_ENDPOINT, json=payload)
+                resp.raise_for_status()
+                result = resp.json()
+
+                if "error" in result:
+                    error_info = result["error"].get("data", {}).get("error_message")
+                    logger.error(f"RPC Error fetching tx details: {error_info}")
+                    raise Exception(f"Transaction verification failed: {error_info}")
+
+                return result.get("result", {})
+
+            except httpx.TimeoutException as e:
+                logger.warning(
+                    f"Timeout while fetching transaction {tx_hash}, retrying..."
+                )
+                raise
+            except Exception as e:
+                logger.error(f"Error fetching transaction {tx_hash}: {str(e)}")
+                raise
 
     async def startup_near_account(self):
         """Start up the NEAR account connection."""
@@ -417,7 +465,9 @@ class BlockchainMonitor:
                         if schedule_type == "wta_amount":  # Winner Takes All
                             amount_text = str(reward_schedule.get("details_text", ""))
                             # Expecting format like "1 NEAR" or "0.5 NEAR"
-                            match = re.search(r"(\d+(?:\.\d+)?)", amount_text)
+                            match = re.search(
+                                r"(\d+\.?\d*)\s*([A-Za-z]{3,})\b", amount_text
+                            )
                             if match:
                                 reward_amount_near_str = match.group(1)
                                 try:
@@ -617,18 +667,44 @@ class BlockchainMonitor:
                 raise
 
     async def verify_transaction_by_hash(
-        self, tx_hash: str, quiz_id: str, expected_sender: Optional[str] = None
+        self,
+        tx_hash: str,
+        quiz_id: str,
+        user_id: Optional[str] = None,
+        expected_sender: Optional[str] = None,
     ) -> tuple[bool, str]:
         """
-        Verify a transaction by its hash, optionally checking the sender.
+        Verify a transaction by its hash, checking that it was sent by the quiz creator.
+
+        Args:
+            tx_hash: The transaction hash to verify
+            quiz_id: The quiz ID being funded
+            user_id: The ID of the user making the payment (quiz creator)
+            expected_sender: Optional specific sender to verify (legacy parameter)
 
         Returns:
             A tuple containing a boolean success status and a user-facing string message.
         """
-        # 1. Strict validation of hash format
-        if not re.match(r"^[1-9A-HJ-NP-Za-km-z]{43,45}$", tx_hash):
-            msg = "Invalid transaction hash format."
-            logger.warning(msg)
+        # 1. Basic validation - check if hash is provided
+        if not tx_hash or not tx_hash.strip():
+            msg = (
+                "No transaction hash provided. Please provide a valid transaction hash."
+            )
+            logger.warning("Empty transaction hash provided")
+            return False, msg
+
+        tx_hash = tx_hash.strip()
+
+        # 2. Length validation - NEAR transaction hashes are typically 44 characters
+        if len(tx_hash) != 44:
+            msg = f"Invalid transaction hash length. Expected 44 characters, got {len(tx_hash)} characters."
+            logger.warning(f"Hash length validation failed for '{tx_hash}': {msg}")
+            return False, msg
+
+        # 3. Format validation - should be base58 encoded
+        if not re.match(r"^[1-9A-HJ-NP-Za-km-z]{44}$", tx_hash):
+            msg = "Invalid transaction hash format. The hash should contain only valid base58 characters (1-9, A-H, J-N, P-Z, a-k, m-z)."
+            logger.warning(f"Hash format validation failed for '{tx_hash}': {msg}")
             return False, msg
 
         if not self.near_account:
@@ -636,9 +712,11 @@ class BlockchainMonitor:
             logger.error("NEAR account not initialized")
             return False, msg
 
-        # open session with retry logic
-        quiz_data = {}
         from store.database import get_db
+        from models.user import User
+
+        quiz_data = {}
+        creator_wallet = None
 
         with get_db() as session:
             quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
@@ -646,19 +724,35 @@ class BlockchainMonitor:
                 msg = f"Quiz {quiz_id} not found."
                 logger.warning(f"Verification failed: {msg}")
                 return False, msg
+
             if quiz.status != QuizStatus.FUNDING:
                 msg = f"This quiz is not currently awaiting funding. Its status is {quiz.status.value}."
                 logger.warning(
                     f"Verification failed: Quiz {quiz_id} is not in FUNDING state (current: {quiz.status})."
                 )
                 return False, msg
+
+            # Fetch the quiz creator's wallet address using the provided user_id
+            if user_id:
+                creator = session.query(User).filter(User.id == user_id).first()
+            else:
+                msg = "Cannot verify transaction - creator user ID not provided."
+                logger.error(f"User ID not provided for quiz {quiz_id} verification.")
+                return False, msg
+
+            if not creator or not creator.wallet_address:
+                msg = "Could not identify the quiz creator or their wallet address. Please make sure you have linked your wallet using /linkwallet."
+                logger.error(
+                    f"User {user_id} not found or has no wallet address for quiz {quiz_id}."
+                )
+                return False, msg
+            creator_wallet = creator.wallet_address
+
             # Store all required attributes while session is open
             quiz_data = {
                 "deposit_address": quiz.deposit_address,
-                "required_amount": (
-                    sum(int(v) for v in quiz.reward_schedule.values())
-                    if quiz.reward_schedule
-                    else 0
+                "required_amount": self._calculate_required_amount(
+                    quiz.reward_schedule
                 ),
                 "topic": quiz.topic,
                 "group_chat_id": quiz.group_chat_id,
@@ -673,21 +767,29 @@ class BlockchainMonitor:
                 .first()
             )
             if existing_quiz:
-                msg = "This transaction hash has already been used for another quiz."
+                # Reject any duplicate use of the same hash
+                msg = "This transaction hash has already been used. Please use a different one."
                 logger.warning(
-                    f"Transaction hash {tx_hash} has already been used for quiz {existing_quiz.id}."
+                    f"Transaction hash {tx_hash} already used for quiz {existing_quiz.id}."
                 )
                 return False, msg
 
         try:
-            # 2. Use the correct, robust RPC fetcher
-            result = await self._fetch_transaction_status_rpc(
-                tx_hash, quiz_data["deposit_address"]
-            )
+            # Use the new, more reliable RPC fetcher
+            result = await self._fetch_transaction_details_rpc(tx_hash, creator_wallet)
 
             if not result or "status" not in result:
                 msg = "The transaction could not be found on the blockchain. Please check the hash and try again."
                 logger.warning(f"RPC returned no result or status for tx {tx_hash}")
+                return False, msg
+
+            # Validate the sender from the transaction details
+            signer_id = result.get("transaction", {}).get("signer_id")
+            if signer_id != creator_wallet:
+                msg = f"This transaction was not sent from the quiz creator's wallet ({creator_wallet})."
+                logger.warning(
+                    f"Transaction sender ({signer_id}) does not match quiz creator wallet ({creator_wallet})."
+                )
                 return False, msg
 
             status = result["status"]
@@ -753,6 +855,8 @@ class BlockchainMonitor:
 
             if total_yocto >= required_yocto_with_fee:
                 # mark active and announce in new session with retry logic
+                from sqlalchemy.exc import IntegrityError
+
                 with get_db() as session:
                     quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
                     if quiz.status != QuizStatus.FUNDING:
@@ -763,7 +867,15 @@ class BlockchainMonitor:
                         return False, msg
                     quiz.status = QuizStatus.ACTIVE
                     quiz.payment_transaction_hash = tx_hash
-                    session.commit()
+                    try:
+                        session.commit()
+                    except IntegrityError as ie:
+                        session.rollback()
+                        msg = "This transaction hash has just been used by another quiz. Please use a different one."
+                        logger.warning(
+                            f"IntegrityError in verify_transaction_by_hash for quiz {quiz_id}: {ie}"
+                        )
+                        return False, msg
 
                 # send announcement using stored quiz data
                 if quiz_data["group_chat_id"]:
@@ -772,7 +884,7 @@ class BlockchainMonitor:
                         text=(
                             f"📣 New quiz '{quiz_data['topic']}' is now active! 🎯\n"
                             f"Total rewards: {quiz_data['required_amount']} NEAR\n"
-                            f"Type /playquiz to participate!"
+                            f"Type /playquiz to participate!",
                         ),
                     )
                 return True, "Quiz activated successfully!"
@@ -780,10 +892,99 @@ class BlockchainMonitor:
                 msg = f"The deposited amount of {total_yocto / NEAR:.4f} NEAR is less than the required {required_amount_with_fee:.4f} NEAR (including fees)."
                 logger.warning(msg)
                 return False, msg
-        except Exception as e:
-            msg = "An unexpected internal error occurred. Please contact an administrator."
-            logger.error(f"Error verifying transaction {tx_hash}: {e}", exc_info=True)
+        except httpx.ReadTimeout:
+            msg = "The blockchain network is currently slow to respond. Please try again in a few moments."
+            logger.warning(f"Timeout error while verifying transaction {tx_hash}")
             return False, msg
+        except httpx.ConnectTimeout:
+            msg = "Unable to connect to the blockchain network. Please try again later."
+            logger.warning(f"Connection timeout while verifying transaction {tx_hash}")
+            return False, msg
+        except Exception as e:
+            # Handle specific retry errors from tenacity
+            if "RetryError" in str(e) and (
+                "ReadTimeout" in str(e) or "Timeout" in str(e)
+            ):
+                msg = "The blockchain network is experiencing delays. Please wait a few minutes and try again."
+                logger.warning(
+                    f"Retry timeout error while verifying transaction {tx_hash}: {e}"
+                )
+                return False, msg
+            elif "RetryError" in str(e):
+                msg = "Unable to verify the transaction after multiple attempts. Please check your transaction hash and try again."
+                logger.warning(
+                    f"Retry error while verifying transaction {tx_hash}: {e}"
+                )
+                return False, msg
+            else:
+                msg = "An unexpected internal error occurred. Please contact an administrator."
+                logger.error(
+                    f"Error verifying transaction {tx_hash}: {e}", exc_info=True
+                )
+                return False, msg
+
+    def _calculate_required_amount(self, reward_schedule: dict) -> float:
+        """
+        Calculate the required amount from a reward schedule.
+
+        Args:
+            reward_schedule: Dictionary containing reward information
+
+        Returns:
+            Required amount as float, or 0.0 if parsing fails
+        """
+        if not reward_schedule:
+            return 0.0
+
+        reward_type = reward_schedule.get("type", "")
+        details_text = reward_schedule.get("details_text", "")
+
+        if not reward_type or not details_text:
+            # Legacy format - try to sum numeric values
+            try:
+                return sum(
+                    float(v)
+                    for v in reward_schedule.values()
+                    if isinstance(v, (int, float))
+                    or (isinstance(v, str) and v.replace(".", "").isdigit())
+                )
+            except (ValueError, TypeError):
+                logger.warning(
+                    f"Could not parse legacy reward schedule: {reward_schedule}"
+                )
+                return 0.0
+
+        # New format - parse from details_text based on type
+        try:
+            import re
+
+            if reward_type == "wta_amount":
+                # e.g., "5 NEAR", "10.5 USDT"
+                match = re.search(r"(\d+\.?\d*)\s*([A-Za-z]{3,})\b", details_text)
+                if match:
+                    return float(match.group(1))
+
+            elif reward_type in ["top3_details", "custom_details"]:
+                # e.g., "3 NEAR for 1st, 2 NEAR for 2nd, 1 NEAR for 3rd"
+                matches = re.findall(r"(\d+\.?\d*)\s*([A-Za-z]{3,})\b", details_text)
+                if matches:
+                    return sum(float(match[0]) for match in matches)
+
+            elif reward_type == "manual_free_text":
+                # Try to extract numbers and sum them
+                matches = re.findall(r"(\d+\.?\d*)\s*([A-Za-z]{3,})\b", details_text)
+                if matches:
+                    return sum(float(match[0]) for match in matches)
+
+        except (ValueError, AttributeError) as e:
+            logger.warning(
+                f"Error parsing reward amount from {reward_type}: {details_text} - {e}"
+            )
+
+        logger.warning(
+            f"Could not determine required amount from reward schedule: {reward_schedule}"
+        )
+        return 0.0
 
 
 # To be called during bot initialization

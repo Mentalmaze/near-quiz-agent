@@ -737,8 +737,32 @@ async def private_message_handler(update: Update, context: CallbackContext):
             f"Handling payment hash input '{payment_hash}' for quiz {quiz_id_awaiting_hash} from user {user_id}"
         )
 
-        # Pass context.application to save_quiz_payment_hash
-        save_success = await save_quiz_payment_hash(
+        # First verify the transaction hash on blockchain before saving to DB
+        app = context.application
+        blockchain_monitor = getattr(app, "blockchain_monitor", None)
+
+        if not blockchain_monitor:
+            blockchain_monitor = getattr(app, "_blockchain_monitor", None)
+
+        if not blockchain_monitor:
+            await update.message.reply_text(
+                "❌ Sorry, I couldn't access the blockchain monitor to verify your transaction. Please wait for automatic verification or contact an administrator."
+            )
+            return
+
+        # Verify transaction on blockchain first
+        verification_success, verification_message = (
+            await blockchain_monitor.verify_transaction_by_hash(
+                payment_hash, quiz_id_awaiting_hash, user_id
+            )
+        )
+
+        if not verification_success:
+            await update.message.reply_text(f"❌ {verification_message}")
+            return
+
+        # Only if blockchain verification succeeds, save to database
+        save_success, save_message = await save_quiz_payment_hash(
             quiz_id_awaiting_hash,
             payment_hash,
             context.application,  # Pass application context
@@ -749,6 +773,7 @@ async def private_message_handler(update: Update, context: CallbackContext):
                 f"✅ Transaction hash '{payment_hash}' received and linked to Quiz ID {quiz_id_awaiting_hash}.\n"
                 "The quiz setup is now complete and funded!"
             )
+
             # Announce quiz activation in the original group chat
             session = SessionLocal()
             try:
@@ -848,10 +873,8 @@ async def private_message_handler(update: Update, context: CallbackContext):
             finally:
                 session.close()
         else:
-            await update.message.reply_text(
-                f"⚠️ There was an issue saving your transaction hash for Quiz ID {quiz_id_awaiting_hash}. "
-                "Please try sending the hash again or contact support."
-            )
+            await update.message.reply_text(f"❌ {save_message}")
+            return
         await RedisClient.delete_user_data_key(  # Use static method
             user_id, "awaiting_payment_hash_for_quiz_id"
         )
