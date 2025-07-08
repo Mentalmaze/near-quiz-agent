@@ -174,6 +174,37 @@ class RedisClient:
         key = f"{cls.USER_DATA_PREFIX}{user_id}"
         return await cls.delete_value(key)  # await
 
+    # --- User Quiz Data ---
+    USER_QUIZ_DATA_PREFIX = "user_quiz_data:"
+    USER_QUIZ_DATA_TTL = 3600 * 6  # 6 hours for active quiz data
+
+    @classmethod
+    async def get_user_quiz_data_all(cls, user_id: str, quiz_id: str) -> Dict[str, Any]:
+        """Gets all quiz-related data for a user for a specific quiz."""
+        key = f"{cls.USER_QUIZ_DATA_PREFIX}{user_id}:{quiz_id}"
+        data = await cls.get_value(key)
+        return data if isinstance(data, dict) else {}
+
+    @classmethod
+    async def set_user_quiz_data(
+        cls, user_id: str, quiz_id: str, data_key: str, value: Any
+    ) -> bool:
+        """Sets a specific key-value pair in a user's data for a quiz."""
+        key = f"{cls.USER_QUIZ_DATA_PREFIX}{user_id}:{quiz_id}"
+        current_data = await cls.get_user_quiz_data_all(user_id, quiz_id)
+        current_data[data_key] = value
+        return await cls.set_value(
+            key, current_data, ttl_seconds=cls.USER_QUIZ_DATA_TTL
+        )
+
+    @classmethod
+    async def get_user_quiz_data(
+        cls, user_id: str, quiz_id: str, data_key: str, default: Optional[Any] = None
+    ) -> Optional[Any]:
+        """Gets a specific value from a user's data for a quiz."""
+        current_data = await cls.get_user_quiz_data_all(user_id, quiz_id)
+        return current_data.get(data_key, default)
+
     # --- Generic Object Caching ---
     @classmethod
     async def get_cached_object(cls, cache_key: str) -> Optional[Any]:  # Made async

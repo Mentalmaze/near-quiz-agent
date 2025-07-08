@@ -47,6 +47,14 @@ class Config:
     # Quiz Configuration
     DEFAULT_QUIZ_QUESTIONS = 1
     MAX_QUIZ_QUESTIONS = 5
+    QUESTION_TIMER_SECONDS = 60  # Time limit for each question
+
+    # Reward Distribution Strategy
+    # "correct_answers_only" - Only participants with at least one correct answer get rewards
+    # "all_participants" - All participants get rewards regardless of correctness
+    REWARD_DISTRIBUTION_STRATEGY = os.getenv(
+        "REWARD_DISTRIBUTION_STRATEGY", "correct_answers_only"
+    )
 
     # Redis Configuration
     REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
