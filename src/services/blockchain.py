@@ -849,23 +849,31 @@ class BlockchainMonitor:
                     total_yocto += int(action["Transfer"].get("deposit", 0))
 
             # Calculate required amount including 2% fee
+            # Use integer arithmetic to avoid floating point precision errors
             required_amount = quiz_data["required_amount"]
-            required_amount_with_fee = round(required_amount * 1.02, 6)
-            required_yocto_with_fee = int(required_amount_with_fee * NEAR)
+            
+            # Convert to yoctoNEAR first, then add 2% fee using integer arithmetic
+            required_yocto_base = int(required_amount * NEAR)
+            fee_yocto = required_yocto_base * 2 // 100  # 2% fee using integer division
+            required_yocto_with_fee = required_yocto_base + fee_yocto
+            
+            # For display purposes, convert back to NEAR
+            required_amount_with_fee = required_yocto_with_fee / NEAR
 
-            # Add a small tolerance for floating point precision issues (1 yoctoNEAR = 1e-24 NEAR)
-            # This prevents rejection of valid transactions due to rounding errors
-            tolerance_yocto = (
-                1000  # Allow up to 1000 yoctoNEAR difference (negligible amount)
-            )
-
+            # Add a tolerance for floating point precision issues
+            # The tolerance should be proportional to the transaction amount to handle
+            # precision errors that scale with the amount being calculated
+            # Use 0.01% of the required amount or 100,000 yoctoNEAR, whichever is larger
+            proportional_tolerance = max(int(required_yocto_with_fee * 0.0001), 100000)
+            
             logger.info(
                 f"Transaction amount verification: deposited={total_yocto} yoctoNEAR ({total_yocto / NEAR:.6f} NEAR), "
                 f"required={required_yocto_with_fee} yoctoNEAR ({required_yocto_with_fee / NEAR:.6f} NEAR), "
-                f"difference={total_yocto - required_yocto_with_fee} yoctoNEAR"
+                f"difference={total_yocto - required_yocto_with_fee} yoctoNEAR, "
+                f"tolerance={proportional_tolerance} yoctoNEAR"
             )
 
-            if total_yocto >= (required_yocto_with_fee - tolerance_yocto):
+            if total_yocto >= (required_yocto_with_fee - proportional_tolerance):
                 # mark active and announce in new session with retry logic
                 from sqlalchemy.exc import IntegrityError
 
