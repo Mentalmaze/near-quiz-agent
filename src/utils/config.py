@@ -47,6 +47,7 @@ class Config:
     # Quiz Configuration
     DEFAULT_QUIZ_QUESTIONS = 1
     MAX_QUIZ_QUESTIONS = 5
+    QUESTION_TIMER_SECONDS = 60  # Time limit for each question
 
     # Redis Configuration
     REDIS_HOST = os.getenv("REDIS_HOST", "localhost")

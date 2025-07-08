@@ -20,13 +20,54 @@ from utils.performance_monitor import (
     track_database_query,
     track_cache_operation,
 )
-from typing import Optional, TYPE_CHECKING, Union
+from typing import Optional, TYPE_CHECKING, Union, Dict, Tuple
 import random
 
 if TYPE_CHECKING:
     from telegram.ext import Application  # Forward reference for type hinting
 
 logger = logging.getLogger(__name__)
+
+# Dictionary to keep track of active question timers
+# Key: (user_id, quiz_id, question_index), Value: asyncio.Task
+active_question_timers: Dict[Tuple[str, str, int], asyncio.Task] = {}
+
+
+async def question_timeout(
+    application: "Application",
+    user_id: str,
+    quiz_id: str,
+    question_index: int,
+    message_id: int,
+):
+    """Handle the timeout for a specific question."""
+    await asyncio.sleep(Config.QUESTION_TIMER_SECONDS)
+    timer_key = (user_id, quiz_id, question_index)
+
+    # Check if the timer is still active before proceeding
+    if timer_key in active_question_timers:
+        logger.info(
+            f"Timeout for user {user_id}, quiz {quiz_id}, question {question_index}"
+        )
+        # Clean up the timer task from the dictionary
+        active_question_timers.pop(timer_key, None)
+
+        # Simulate a timeout answer by calling a simplified answer handler
+        # We pass a mock update and context, as the full objects are not available
+        # A more robust implementation might refactor handle_quiz_answer
+        # to not depend so heavily on the Update and Context objects.
+        await safe_edit_message_text(
+            application.bot,
+            user_id,
+            message_id,
+            "Time's up! Moving to the next question.",
+            reply_markup=None,
+        )
+        # This is a simplified call to the answer handling logic.
+        # It bypasses the direct need for `update` and `context` objects from a user interaction.
+        await handle_quiz_answer_logic(
+            application, user_id, quiz_id, question_index, "TIMEOUT", message_id
+        )
 
 
 async def create_quiz(update: Update, context: CallbackContext):
@@ -799,7 +840,7 @@ async def play_quiz(update: Update, context: CallbackContext):
         # Send the first question from the shuffled list
         first_question_shuffled_index = question_indices[0]
         await send_quiz_question(
-            context.bot,
+            context.application,
             user_id,
             quiz_to_dm,
             first_question_shuffled_index,
@@ -820,9 +861,14 @@ async def play_quiz(update: Update, context: CallbackContext):
 
 
 async def send_quiz_question(
-    bot, user_id, quiz, question_index, current_num, total_questions
+    application: "Application",
+    user_id,
+    quiz,
+    question_index,
+    current_num,
+    total_questions,
 ):
-    """Send a specific question from the quiz to the user."""
+    """Send a specific question from the quiz to the user and start a timer."""
 
     # Get the questions list
     questions_list = quiz.questions
@@ -835,7 +881,7 @@ async def send_quiz_question(
     if question_index >= len(questions_list):
         # We've sent all questions
         await safe_send_message(
-            bot,
+            application.bot,
             user_id,
             f"You've tackled all {len(questions_list)} questions in the '{quiz.topic}' quiz! Your answers are saved. Eager to see the results? Use `/winners {quiz.id}`.",
         )
@@ -851,6 +897,9 @@ async def send_quiz_question(
     question_number = current_num + 1
     message_text_parts.append(
         f"Quiz: {quiz.topic} (Question {question_number}/{total_questions})"
+    )
+    message_text_parts.append(
+        f"⏳ You have {Config.QUESTION_TIMER_SECONDS} seconds to answer."
     )
     message_text_parts.append(f"\n{question_text}\n")
 
@@ -874,33 +923,76 @@ async def send_quiz_question(
     full_message_text = "\n".join(message_text_parts)
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await safe_send_message(
-        bot,
+    sent_message = await safe_send_message(
+        application.bot,
         user_id,
         text=full_message_text,
         reply_markup=reply_markup,
     )
 
+    if sent_message:
+        # Create and store the timeout task
+        timer_key = (str(user_id), quiz.id, question_index)
+        timer_task = application.create_task(
+            question_timeout(
+                application,
+                str(user_id),
+                quiz.id,
+                question_index,
+                sent_message.message_id,
+            )
+        )
+        active_question_timers[timer_key] = timer_task
+
 
 async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Process quiz answers from inline keyboard callbacks."""
-    async with track_quiz_answer_submission({"user_id": str(update.effective_user.id)}):
-        query = update.callback_query
-        await query.answer()  # Acknowledge the button press
+    query = update.callback_query
+    await query.answer()  # Acknowledge the button press
 
-        # Parse callback data to get quiz ID, question index, and answer
-        try:
-            _, quiz_id, question_index, answer = query.data.split(":")
-            question_index = int(question_index)
-        except ValueError:
-            await safe_edit_message_text(
-                context.bot,
-                query.message.chat_id,
-                query.message.message_id,
-                "Invalid answer format.",
-            )
-            return
+    # Parse callback data to get quiz ID, question index, and answer
+    try:
+        _, quiz_id, question_index_str, answer = query.data.split(":")
+        question_index = int(question_index_str)
+    except ValueError:
+        await safe_edit_message_text(
+            context.bot,
+            query.message.chat_id,
+            query.message.message_id,
+            "Invalid answer format.",
+        )
+        return
 
+    user_id = str(update.effective_user.id)
+
+    # Cancel the timer for this question
+    timer_key = (user_id, quiz_id, question_index)
+    if timer_key in active_question_timers:
+        active_question_timers[timer_key].cancel()
+        active_question_timers.pop(timer_key, None)
+
+    await handle_quiz_answer_logic(
+        context.application,
+        user_id,
+        quiz_id,
+        question_index,
+        answer,
+        query.message.message_id,
+        query.message.text,
+    )
+
+
+async def handle_quiz_answer_logic(
+    application: "Application",
+    user_id: str,
+    quiz_id: str,
+    question_index: int,
+    answer: str,
+    message_id: int,
+    original_message_text: Optional[str] = None,
+):
+    """Core logic to process a quiz answer, reusable by timeout and callback handlers."""
+    async with track_quiz_answer_submission({"user_id": user_id}):
         # Get quiz from database with optimized query
         session = SessionLocal()
         try:
@@ -915,12 +1007,13 @@ async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 )
 
             if not quiz:
-                await safe_edit_message_text(
-                    context.bot,
-                    query.message.chat_id,
-                    query.message.message_id,
-                    "Quiz not found.",
-                )
+                if original_message_text:  # Only edit if we have the original message
+                    await safe_edit_message_text(
+                        application.bot,
+                        user_id,
+                        message_id,
+                        "Quiz not found.",
+                    )
                 return
 
             # Get questions list, handling legacy format
@@ -930,23 +1023,27 @@ async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
             # Validate question index early
             if question_index >= len(questions_list):
-                await safe_edit_message_text(
-                    context.bot,
-                    query.message.chat_id,
-                    query.message.message_id,
-                    "Invalid question index.",
-                )
+                if original_message_text:
+                    await safe_edit_message_text(
+                        application.bot,
+                        user_id,
+                        message_id,
+                        "Invalid question index.",
+                    )
                 return
 
-            current_q = questions_list[question_index]
-            correct_answer = current_q.get("correct", "")
-            is_correct = correct_answer == answer
+            # For a timeout, correctness is always False.
+            if answer == "TIMEOUT":
+                is_correct = False
+            else:
+                current_q = questions_list[question_index]
+                correct_answer = current_q.get("correct", "")
+                is_correct = correct_answer == answer
 
             # Get user info
-            user_id = str(update.effective_user.id)
-            username = (
-                update.effective_user.username or update.effective_user.first_name
-            )
+            # In a timeout scenario, we don't have the full `update` object.
+            # We can fetch the username from the database if needed, but for now, we'll use the ID.
+            username = f"user_{user_id}"  # Fallback username
 
             # PERFORMANCE OPTIMIZATION: Use efficient exists() query instead of first()
             start_time = time.time()
@@ -966,12 +1063,13 @@ async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 )
 
             if answer_exists:
-                await safe_edit_message_text(
-                    context.bot,
-                    query.message.chat_id,
-                    query.message.message_id,
-                    "You have already answered this question.",
-                )
+                if original_message_text:
+                    await safe_edit_message_text(
+                        application.bot,
+                        user_id,
+                        message_id,
+                        "You have already answered this question.",
+                    )
                 return
 
             quiz_answer = QuizAnswer(
@@ -991,6 +1089,10 @@ async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
             # ANTI-CHEAT FEATURE: Prepare a neutral confirmation message instead of revealing the answer.
             result_message = "Answer recorded. Moving to the next question..."
+            if answer == "TIMEOUT":
+                result_message = (
+                    "Time's up! Your answer was not recorded in time. Moving on..."
+                )
 
             # PERFORMANCE OPTIMIZATION: Execute operations concurrently where possible
             # Get the user's shuffled question order and new position from Redis
@@ -1034,13 +1136,14 @@ async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     await redis_client.close()
 
             # Execute UI updates immediately, database/cache operations in background
-            await safe_edit_message_text(
-                context.bot,
-                query.message.chat_id,
-                query.message.message_id,
-                result_message,
-                reply_markup=None,
-            )
+            if original_message_text:
+                await safe_edit_message_text(
+                    application.bot,
+                    user_id,
+                    message_id,
+                    result_message,
+                    reply_markup=None,
+                )
 
             # Start next question immediately for better UX
             if question_order and next_position < len(question_order):
@@ -1054,8 +1157,8 @@ async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
                 next_question_task = asyncio.create_task(
                     send_quiz_question(
-                        context.bot,
-                        query.message.chat_id,
+                        application,
+                        user_id,
                         quiz,
                         next_question_index,
                         next_position,
@@ -1065,8 +1168,8 @@ async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
             else:
                 # Quiz is finished for this user
                 await safe_send_message(
-                    context.bot,
-                    query.message.chat_id,
+                    application.bot,
+                    user_id,
                     f"You've tackled all {len(question_order)} questions in the '{quiz.topic}' quiz! Your answers are saved. Eager to see the results? Use `/winners {quiz.id}`.",
                 )
                 next_question_task = asyncio.create_task(asyncio.sleep(0))  # No-op task
@@ -1085,7 +1188,6 @@ async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
             logger.error(f"Error handling quiz answer: {e}", exc_info=True)
             # Rollback on error to ensure data consistency
             session.rollback()
-            import traceback
 
             traceback.print_exc()
         finally:
