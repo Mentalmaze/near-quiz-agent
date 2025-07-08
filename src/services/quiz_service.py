@@ -21,6 +21,7 @@ from utils.performance_monitor import (
     track_cache_operation,
 )
 from typing import Optional, TYPE_CHECKING, Union
+import random
 
 if TYPE_CHECKING:
     from telegram.ext import Application  # Forward reference for type hinting
@@ -755,6 +756,19 @@ async def play_quiz(update: Update, context: CallbackContext):
 
         quiz_to_dm = session.query(Quiz).filter(Quiz.id == quiz_id_to_play).first()
 
+        # ANTI-CHEAT: Shuffle questions for each user
+        questions = quiz_to_dm.questions
+        question_indices = list(range(len(questions)))
+        random.shuffle(question_indices)
+
+        # Store the shuffled order and initial position in Redis
+        redis_client = RedisClient()
+        await redis_client.set_user_quiz_data(
+            user_id, quiz_id_to_play, "question_order", question_indices
+        )
+        await redis_client.set_user_quiz_data(user_id, quiz_id_to_play, "current_position", 0)
+        await redis_client.close()
+
         if not quiz_to_dm:
             await safe_send_message(
                 context.bot,
@@ -780,7 +794,9 @@ async def play_quiz(update: Update, context: CallbackContext):
                 f"@{user_username}, I'll send you the quiz '{quiz_to_dm.topic}' (ID: {quiz_id_to_play[:8]}...) in a private message!",
             )
 
-        await send_quiz_question(context.bot, user_id, quiz_to_dm, 0)
+        # Send the first question from the shuffled list
+        first_question_shuffled_index = question_indices[0]
+        await send_quiz_question(context.bot, user_id, quiz_to_dm, first_question_shuffled_index, 0, len(questions))
 
     except Exception as e:
         logger.error(f"Error in play_quiz: {e}", exc_info=True)
@@ -794,7 +810,7 @@ async def play_quiz(update: Update, context: CallbackContext):
             session.close()
 
 
-async def send_quiz_question(bot, user_id, quiz, question_index):
+async def send_quiz_question(bot, user_id, quiz, question_index, current_num, total_questions):
     """Send a specific question from the quiz to the user."""
 
     # Get the questions list
@@ -821,18 +837,18 @@ async def send_quiz_question(bot, user_id, quiz, question_index):
 
     # Prepare message text with full options
     message_text_parts = []
-    question_number = question_index + 1
-    total_questions = len(questions_list)
+    question_number = current_num + 1
     message_text_parts.append(
         f"Quiz: {quiz.topic} (Question {question_number}/{total_questions})"
     )
     message_text_parts.append(f"\n{question_text}\n")
 
     keyboard = []
-    option_labels = sorted(options.keys())  # Ensure consistent order, e.g., A, B, C, D
+    # ANTI-CHEAT: Shuffle answer options
+    option_items = list(options.items())
+    random.shuffle(option_items)
 
-    for key in option_labels:
-        value = options[key]
+    for key, value in option_items:
         message_text_parts.append(f"{key}) {value}")
         # Include question index in callback data to track progress
         keyboard.append(
@@ -966,7 +982,17 @@ async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
             result_message = "Answer recorded. Moving to the next question..."
 
             # PERFORMANCE OPTIMIZATION: Execute operations concurrently where possible
-            next_question_index = question_index + 1
+            # Get the user's shuffled question order and new position from Redis
+            redis_client = RedisClient()
+            question_order = await redis_client.get_user_quiz_data(
+                user_id, quiz_id, "question_order"
+            )
+            current_position = await redis_client.get_user_quiz_data(
+                user_id, quiz_id, "current_position"
+            )
+            await redis_client.close()
+
+            next_position = current_position + 1
 
             # Create concurrent tasks for performance optimization
             async def commit_database():
@@ -1006,11 +1032,28 @@ async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )
 
             # Start next question immediately for better UX
-            next_question_task = asyncio.create_task(
-                send_quiz_question(
-                    context.bot, query.message.chat_id, quiz, next_question_index
+            if question_order and next_position < len(question_order):
+                next_question_index = question_order[next_position]
+                # Update the user's position for the next question
+                redis_client = RedisClient()
+                await redis_client.set_user_quiz_data(
+                    user_id, quiz_id, "current_position", next_position
                 )
-            )
+                await redis_client.close()
+
+                next_question_task = asyncio.create_task(
+                    send_quiz_question(
+                        context.bot, query.message.chat_id, quiz, next_question_index, next_position, len(question_order)
+                    )
+                )
+            else:
+                # Quiz is finished for this user
+                await safe_send_message(
+                    context.bot,
+                    query.message.chat_id,
+                    f"You've tackled all {len(question_order)} questions in the '{quiz.topic}' quiz! Your answers are saved. Eager to see the results? Use `/winners {quiz.id}`.",
+                )
+                next_question_task = asyncio.create_task(asyncio.sleep(0)) # No-op task
 
             # Run database and cache operations concurrently
             db_cache_tasks = [
