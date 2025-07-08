@@ -1255,21 +1255,6 @@ async def handle_transaction_hash(update: Update, context: CallbackContext):
             await redis_client.delete_user_data_key(user_id, "awaiting")
             return
 
-        # Fetch the user's linked wallet address to use as the sender_id
-        session = SessionLocal()
-        try:
-            user = session.query(User).filter(User.id == user_id).first()
-            if not user or not user.wallet_address:
-                await safe_send_message(
-                    context.bot,
-                    update.effective_chat.id,
-                    "You do not have a wallet linked. Please link your wallet first using /linkwallet and then send the transaction hash again.",
-                )
-                return
-            sender_wallet = user.wallet_address
-        finally:
-            session.close()
-
         await context.bot.send_chat_action(
             chat_id=update.effective_chat.id, action="typing"
         )
@@ -1289,28 +1274,26 @@ async def handle_transaction_hash(update: Update, context: CallbackContext):
             await redis_client.delete_user_data_key(user_id, "awaiting")
             return
 
-        # Pass the required sender_wallet to the verification function
-        verification_result = await blockchain_monitor.verify_transaction_by_hash(
-            tx_hash, quiz_id, sender_wallet
+        success, message = await blockchain_monitor.verify_transaction_by_hash(
+            tx_hash, quiz_id
         )
 
-        if verification_result["success"]:
+        if success:
             await safe_send_message(
                 context.bot,
                 update.effective_chat.id,
-                f"✅ {verification_result['message']}",
+                "✅ Transaction verified successfully! Your quiz is now active and ready to play.",
             )
-            # Clear the user's state since the process is complete
+            # The announcement to the group is now handled within verify_transaction_by_hash
             await redis_client.delete_user_data_key(user_id, "awaiting")
-            await redis_client.delete_user_data_key(user_id, "quiz_id")
         else:
-            # Provide the specific error message from the verification function
+            # Provide the specific error message to the user
             await safe_send_message(
                 context.bot,
                 update.effective_chat.id,
-                f"❌ Verification failed: {verification_result['message']}",
+                f"❌ Verification failed: {message}",
             )
-            # We don't clear the 'awaiting' state here, so the user can try again with a new hash.
+            # Do not clear the 'awaiting' state, so the user can try again with a new hash.
 
     finally:
         await redis_client.close()
