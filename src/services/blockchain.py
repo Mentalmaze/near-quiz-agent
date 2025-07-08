@@ -759,6 +759,14 @@ class BlockchainMonitor:
                 "created_at": quiz.created_at,
             }
 
+            # Validate that deposit address is properly set
+            if not quiz_data["deposit_address"]:
+                msg = "Quiz deposit address is not configured. Please contact an administrator."
+                logger.error(
+                    f"Quiz {quiz_id} has no deposit_address set. This indicates a configuration problem."
+                )
+                return False, msg
+
         # Check if this hash has already been used for any quiz
         with get_db() as session:
             existing_quiz = (
@@ -808,39 +816,31 @@ class BlockchainMonitor:
                 return False, msg
 
             tx = result.get("transaction", {})
-            if tx.get("receiver_id") != quiz_data["deposit_address"]:
-                msg = f"The funds were sent to the wrong address. Please send them to `{quiz_data['deposit_address']}`."
+            receiver_id = tx.get("receiver_id")
+            expected_address = quiz_data["deposit_address"]
+
+            if receiver_id != expected_address:
+                msg = f"The funds were sent to the wrong address. Please send them to `{expected_address}`."
                 logger.warning(
-                    f"Transaction receiver ({tx.get('receiver_id')}) does not match deposit address ({quiz_data['deposit_address']})."
+                    f"Transaction receiver ({receiver_id}) does not match deposit address ({expected_address})."
                 )
                 return False, msg
 
             # 3. Enforce stricter transfer window: only accept transactions after quiz creation and within 15 minutes
-            block_timestamp_ns = result.get("transaction_outcome", {}).get("block_hash")
-            if not block_timestamp_ns:
-                block_timestamp_ns = result.get("block_timestamp") or result.get(
-                    "block_timestamp_nanosec"
-                )
-
-            if block_timestamp_ns:
-                block_timestamp = datetime.utcfromtimestamp(
-                    int(block_timestamp_ns) / 1e9
-                )
-                quiz_created_at = quiz_data.get("created_at")
-                if quiz_created_at:
-                    time_limit = timedelta(minutes=15)
-                    # Only accept if transaction is after quiz creation and within 15 minutes
-                    if not (
-                        quiz_created_at
-                        <= block_timestamp
-                        <= (quiz_created_at + time_limit)
-                    ):
-                        msg = "This transaction is too old. Please submit a transaction hash that is less than 15 minutes old."
-                        logger.warning(
-                            f"Transaction {tx_hash} is outside the allowed window. "
-                            f"Block time: {block_timestamp}, Quiz created: {quiz_created_at}, Limit: {time_limit}"
-                        )
-                        return False, msg
+            quiz_created_at = quiz_data.get("created_at")
+            if quiz_created_at:
+                # Get block hash from transaction outcome for timestamp validation
+                block_hash = result.get("transaction_outcome", {}).get("block_hash")
+                if block_hash:
+                    is_valid, error_msg = await self._validate_transaction_timestamp(
+                        block_hash, quiz_created_at, tx_hash
+                    )
+                    if not is_valid:
+                        return False, error_msg
+                else:
+                    logger.warning(
+                        f"No block hash found in transaction outcome for tx {tx_hash}. Skipping timestamp validation."
+                    )
 
             actions = tx.get("actions", [])
             total_yocto = 0
@@ -853,7 +853,19 @@ class BlockchainMonitor:
             required_amount_with_fee = round(required_amount * 1.02, 6)
             required_yocto_with_fee = int(required_amount_with_fee * NEAR)
 
-            if total_yocto >= required_yocto_with_fee:
+            # Add a small tolerance for floating point precision issues (1 yoctoNEAR = 1e-24 NEAR)
+            # This prevents rejection of valid transactions due to rounding errors
+            tolerance_yocto = (
+                1000  # Allow up to 1000 yoctoNEAR difference (negligible amount)
+            )
+
+            logger.info(
+                f"Transaction amount verification: deposited={total_yocto} yoctoNEAR ({total_yocto / NEAR:.6f} NEAR), "
+                f"required={required_yocto_with_fee} yoctoNEAR ({required_yocto_with_fee / NEAR:.6f} NEAR), "
+                f"difference={total_yocto - required_yocto_with_fee} yoctoNEAR"
+            )
+
+            if total_yocto >= (required_yocto_with_fee - tolerance_yocto):
                 # mark active and announce in new session with retry logic
                 from sqlalchemy.exc import IntegrityError
 
@@ -889,8 +901,12 @@ class BlockchainMonitor:
                     )
                 return True, "Quiz activated successfully!"
             else:
-                msg = f"The deposited amount of {total_yocto / NEAR:.4f} NEAR is less than the required {required_amount_with_fee:.4f} NEAR (including fees)."
-                logger.warning(msg)
+                shortage_yocto = required_yocto_with_fee - total_yocto
+                shortage_near = shortage_yocto / NEAR
+                msg = f"The deposited amount of {total_yocto / NEAR:.6f} NEAR is {shortage_near:.6f} NEAR short of the required {required_amount_with_fee:.6f} NEAR (including fees)."
+                logger.warning(
+                    f"Insufficient funds: deposited={total_yocto} yoctoNEAR, required={required_yocto_with_fee} yoctoNEAR, shortage={shortage_yocto} yoctoNEAR"
+                )
                 return False, msg
         except httpx.ReadTimeout:
             msg = "The blockchain network is currently slow to respond. Please try again in a few moments."
@@ -985,6 +1001,97 @@ class BlockchainMonitor:
             f"Could not determine required amount from reward schedule: {reward_schedule}"
         )
         return 0.0
+
+    async def _fetch_block_details(self, block_hash: str) -> Optional[Dict[str, Any]]:
+        """
+        Fetches block details from NEAR RPC to get timestamp information.
+
+        Args:
+            block_hash: The block hash to query.
+
+        Returns:
+            A dictionary containing block details including timestamp, or None if failed.
+        """
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            payload = {
+                "jsonrpc": "2.0",
+                "id": "dontcare",
+                "method": "block",
+                "params": {"block_id": block_hash},
+            }
+            try:
+                resp = await client.post(Config.NEAR_RPC_ENDPOINT, json=payload)
+                resp.raise_for_status()
+                result = resp.json()
+
+                if "error" in result:
+                    error_info = result["error"].get("data", {}).get("error_message")
+                    logger.warning(f"RPC Error fetching block details: {error_info}")
+                    return None
+
+                return result.get("result", {})
+
+            except httpx.TimeoutException:
+                logger.warning(f"Timeout while fetching block {block_hash}")
+                return None
+            except Exception as e:
+                logger.warning(f"Error fetching block {block_hash}: {str(e)}")
+                return None
+
+    async def _validate_transaction_timestamp(
+        self, block_hash: str, quiz_created_at: datetime, tx_hash: str
+    ) -> tuple[bool, str]:
+        """
+        Validates that a transaction occurred within the allowed time window.
+
+        Args:
+            block_hash: The block hash from the transaction outcome.
+            quiz_created_at: When the quiz was created.
+            tx_hash: Transaction hash for logging.
+
+        Returns:
+            Tuple of (is_valid: bool, error_message: str)
+        """
+        try:
+            block_details = await self._fetch_block_details(block_hash)
+            if not block_details:
+                logger.warning(
+                    f"Could not fetch block details for timestamp validation of tx {tx_hash}. Allowing transaction."
+                )
+                return True, ""
+
+            # Extract timestamp from block header
+            header = block_details.get("header", {})
+            timestamp_nanosec = header.get("timestamp", 0)
+
+            if not timestamp_nanosec:
+                logger.warning(
+                    f"No timestamp found in block {block_hash} for tx {tx_hash}. Allowing transaction."
+                )
+                return True, ""
+
+            # Convert nanoseconds to datetime
+            block_timestamp = datetime.utcfromtimestamp(int(timestamp_nanosec) / 1e9)
+            time_limit = timedelta(minutes=15)
+
+            # Check if transaction is within allowed window
+            if not (
+                quiz_created_at <= block_timestamp <= (quiz_created_at + time_limit)
+            ):
+                msg = "This transaction is too old. Please submit a transaction hash that is less than 15 minutes old."
+                logger.warning(
+                    f"Transaction {tx_hash} is outside the allowed window. "
+                    f"Block time: {block_timestamp}, Quiz created: {quiz_created_at}, Limit: {time_limit}"
+                )
+                return False, msg
+
+            return True, ""
+
+        except (ValueError, TypeError) as e:
+            logger.warning(
+                f"Error validating timestamp for transaction {tx_hash}: {e}. Allowing transaction."
+            )
+            return True, ""
 
 
 # To be called during bot initialization

@@ -1141,10 +1141,15 @@ async def show_all_active_leaderboards_command(
                 response_message += "<b>Leaderboard:</b>\n"
                 for i, entry in enumerate(quiz_info["participants"][:3]):
                     rank_emoji = ["🥇", "🥈", "🥉"][i] if i < 3 else "🏅"
-                    username = html.escape(
-                        entry.get("username")
-                        or f"User_{entry.get('user_id', 'Unknown')[:4]}"
-                    )
+                    # Improve username display and tagging
+                    username = entry.get("username")
+                    if not username:
+                        user_id = entry.get("user_id", "Unknown")
+                        username = (
+                            f"User_{user_id[:8]}" if user_id != "Unknown" else "Unknown"
+                        )
+                    username = html.escape(username)
+
                     score = entry.get(
                         "score", "-"
                     )  # Changed from entry["correct_count"] to entry.get("score", "-")
@@ -1155,7 +1160,7 @@ async def show_all_active_leaderboards_command(
                 response_message += "<i>No participants yet. Be the first!</i>\n"
 
             response_message += (
-                f"\n➡️ Play this quiz: <code>/playquiz {quiz_id_full}</code>\n"
+                f"\n➡️ Play this quiz: <code> /playquiz {quiz_id_full}</code>\n"
             )
 
         response_message += "<pre>------------------------------</pre>\n"

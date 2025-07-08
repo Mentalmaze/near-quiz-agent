@@ -301,6 +301,16 @@ async def process_questions(
         )
         return
 
+    # Validate deposit address configuration before creating quiz
+    if not Config.DEPOSIT_ADDRESS:
+        await safe_send_message(
+            context.bot,
+            update.effective_chat.id,
+            "❌ System configuration error: Deposit address is not configured. Please contact an administrator to set up NEAR_WALLET_ADDRESS.",
+        )
+        logger.error("DEPOSIT_ADDRESS is not set in configuration - cannot create quiz")
+        return
+
     # Persist quiz with multiple questions
     session = SessionLocal()
     try:
@@ -310,12 +320,13 @@ async def process_questions(
             status=QuizStatus.DRAFT,  # Initial status is DRAFT
             group_chat_id=group_chat_id,
             duration_seconds=duration_seconds,  # Store the duration
+            deposit_address=Config.DEPOSIT_ADDRESS,  # Set deposit address from config
         )
         session.add(quiz)
         session.commit()
         quiz_id = quiz.id
         logger.info(
-            f"Created quiz with ID: {quiz_id} in DRAFT status with duration {duration_seconds} seconds."
+            f"Created quiz with ID: {quiz_id} in DRAFT status with duration {duration_seconds} seconds and deposit address {Config.DEPOSIT_ADDRESS}."
         )
     finally:
         session.close()
@@ -1260,20 +1271,39 @@ async def handle_reward_structure(update: Update, context: ContextTypes.DEFAULT_
 
         schedule = {i + 1: int(a) for i, a in enumerate(amounts)}
         total = sum(schedule.values())
-        deposit_addr = Config.NEAR_WALLET_ADDRESS
+        deposit_addr = Config.DEPOSIT_ADDRESS  # Use DEPOSIT_ADDRESS instead of NEAR_WALLET_ADDRESS
+
+        # Validate deposit address configuration
+        if not deposit_addr:
+            await safe_send_message(
+                context.bot,
+                update.effective_chat.id,
+                "❌ Deposit address is not configured. Please contact an administrator to set up NEAR_WALLET_ADDRESS.",
+            )
+            logger.error("DEPOSIT_ADDRESS is not set in configuration")
+            return
 
         quiz_topic = None
         original_group_chat_id = None
         quiz_id = None  # Initialize quiz_id
 
+        # Get the quiz ID from Redis context (should be set during reward setup flow)
+        quiz_id = await redis_client.get_user_data_key(user_id, "current_quiz_id_for_reward_setup")
+        
         session = SessionLocal()
         try:
-            quiz = (
-                session.query(Quiz)
-                .filter(Quiz.status == QuizStatus.ACTIVE)
-                .order_by(Quiz.last_updated.desc())
-                .first()
-            )
+            if quiz_id:
+                # Look for the specific quiz that needs reward setup
+                quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
+            else:
+                # Fallback: look for most recent DRAFT quiz by this user (creator)
+                # Note: This is a fallback and should ideally not be needed if Redis state is maintained
+                quiz = (
+                    session.query(Quiz)
+                    .filter(Quiz.status == QuizStatus.DRAFT)
+                    .order_by(Quiz.last_updated.desc())
+                    .first()
+                )
 
             if not quiz:
                 await safe_send_message(
@@ -1471,8 +1501,14 @@ async def get_winners(update: Update, context: CallbackContext):
 
         for i, winner in enumerate(winners[:10]):  # Show top 10 max
             rank = i + 1
-            username = winner["username"] or f"User{winner['user_id'][-4:]}"
+            # Improve username display and tagging
+            username = winner.get("username")
+            if not username:
+                winner_user_id = winner.get("user_id", "UnknownUser")
+                username = f"User_{winner_user_id[:8]}"
+
             correct = winner["correct_count"]
+            rank_emoji = ["🥇", "🥈", "🥉"][i] if i < 3 else "🏅"
 
             # Show reward if this position has a reward and quiz is active/closed
             reward_text = ""
@@ -1481,7 +1517,7 @@ async def get_winners(update: Update, context: CallbackContext):
             elif rank in reward_schedule:
                 reward_text = f" - {reward_schedule[rank]} NEAR"
 
-            message += f"{rank}. @{username}: {correct} correct answers{reward_text}\n"
+            message += f"{rank_emoji} {rank}. @{username}: {correct} correct answers{reward_text}\n"
 
         # Add quiz status info
         status = f"Quiz is {quiz.status.value.lower()}"
@@ -1644,17 +1680,90 @@ async def distribute_quiz_rewards(
                 # Blockchain distribution was successful
                 if quiz.group_chat_id and bot_to_use:
                     winners = QuizAnswer.compute_quiz_winners(session, quiz_id)
+                    reward_schedule = quiz.reward_schedule or {}
+                    reward_type = reward_schedule.get("type", "")
+
                     final_message_to_group = ""
                     if winners:
-                        winner_username = winners[0].get("username")
-                        if not winner_username:  # Fallback if username is None or empty
-                            winner_user_id = winners[0].get("user_id", "UnknownUser")
-                            winner_username = (
-                                f"User_{winner_user_id[:6]}"  # Placeholder username
+                        # Create a more engaging and detailed winner announcement
+                        final_message_to_group = (
+                            f'🎉 Quiz "{quiz.topic}" is officially complete!\n\n'
+                        )
+                        final_message_to_group += "🏆 **WINNERS ANNOUNCED** 🏆\n\n"
+
+                        # Handle different reward types for appropriate winner announcements
+                        if reward_type == "wta_amount" and len(winners) >= 1:
+                            # Winner Takes All - announce single winner
+                            winner = winners[0]
+                            winner_username = winner.get("username")
+                            if not winner_username:
+                                winner_user_id = winner.get("user_id", "UnknownUser")
+                                winner_username = f"User_{winner_user_id[:8]}"
+
+                            correct_count = winner.get("correct_count", 0)
+                            final_message_to_group += (
+                                f"🥇 Champion: @{winner_username}\n"
                             )
-                        final_message_to_group = f'quiz "{quiz.topic}" is officially over. thanks to all the participants our winner is @{winner_username}'
+                            final_message_to_group += (
+                                f"📊 Score: {correct_count} correct answers\n"
+                            )
+                            final_message_to_group += (
+                                f"💰 Takes the entire prize pool!\n\n"
+                            )
+
+                        elif reward_type in ["top3_details", "custom_details"]:
+                            # Top 3 or custom rewards - announce multiple winners
+                            final_message_to_group += (
+                                "🏅 **Leaderboard Champions:**\n\n"
+                            )
+                            for i, winner in enumerate(winners[:3]):  # Show top 3
+                                rank_emoji = ["🥇", "🥈", "🥉"][i] if i < 3 else "🏅"
+                                winner_username = winner.get("username")
+                                if not winner_username:
+                                    winner_user_id = winner.get(
+                                        "user_id", "UnknownUser"
+                                    )
+                                    winner_username = f"User_{winner_user_id[:8]}"
+
+                                correct_count = winner.get("correct_count", 0)
+                                final_message_to_group += f"{rank_emoji} {i+1}. @{winner_username} - {correct_count} correct\n"
+                            final_message_to_group += (
+                                "\n💰 Prizes distributed according to rankings!\n\n"
+                            )
+
+                        else:
+                            # Default announcement for other reward types
+                            winner = winners[0]
+                            winner_username = winner.get("username")
+                            if not winner_username:
+                                winner_user_id = winner.get("user_id", "UnknownUser")
+                                winner_username = f"User_{winner_user_id[:8]}"
+
+                            correct_count = winner.get("correct_count", 0)
+                            final_message_to_group += (
+                                f"🥇 Champion: @{winner_username}\n"
+                            )
+                            final_message_to_group += (
+                                f"📊 Score: {correct_count} correct answers\n\n"
+                            )
+
+                        final_message_to_group += (
+                            "🎯 Thanks to all participants for playing!\n"
+                        )
+                        final_message_to_group += (
+                            "💎 NEAR rewards have been sent to winners' wallets."
+                        )
                     else:
-                        final_message_to_group = f'quiz "{quiz.topic}" is officially over. thanks to all the participants! Unfortunately, there were no winners this time.'
+                        final_message_to_group = (
+                            f'🎯 Quiz "{quiz.topic}" is officially complete!\n\n'
+                        )
+                        final_message_to_group += (
+                            "📊 Unfortunately, there were no winners this time.\n"
+                        )
+                        final_message_to_group += (
+                            "🎯 Thanks to all participants for playing!\n"
+                        )
+                        final_message_to_group += "💪 Better luck in the next quiz!"
 
                     await bot_to_use.send_message(
                         chat_id=quiz.group_chat_id, text=final_message_to_group
