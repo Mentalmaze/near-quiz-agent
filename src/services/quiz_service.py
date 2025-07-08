@@ -962,12 +962,8 @@ async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
             # PERFORMANCE OPTIMIZATION: Add answer to session
             session.add(quiz_answer)
 
-            # Prepare success message
-            result_message = (
-                f"{query.message.text}\n\n"
-                f"Your answer: {answer}\n"
-                f"{'✅ Correct!' if is_correct else f'❌ Wrong. The correct answer is {correct_answer}.'}"
-            )
+            # ANTI-CHEAT FEATURE: Prepare a neutral confirmation message instead of revealing the answer.
+            result_message = "Answer recorded. Moving to the next question..."
 
             # PERFORMANCE OPTIMIZATION: Execute operations concurrently where possible
             next_question_index = question_index + 1
