@@ -67,7 +67,13 @@ async def question_timeout(
         # This is a simplified call to the answer handling logic.
         # It bypasses the direct need for `update` and `context` objects from a user interaction.
         await handle_quiz_answer_logic(
-            application, user_id, quiz_id, question_index, "TIMEOUT", message_id
+            application,
+            user_id,
+            quiz_id,
+            question_index,
+            "TIMEOUT",
+            message_id,
+            username=None,
         )
 
 
@@ -985,6 +991,12 @@ async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     user_id = str(update.effective_user.id)
+    # Get the actual username for proper display
+    user_username = (
+        update.effective_user.username
+        or update.effective_user.first_name
+        or f"user_{user_id}"
+    )
 
     # Cancel the timer for this question
     timer_key = (user_id, quiz_id, question_index)
@@ -1000,6 +1012,7 @@ async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
         answer,
         query.message.message_id,
         query.message.text,
+        username=user_username,
     )
 
 
@@ -1011,6 +1024,7 @@ async def handle_quiz_answer_logic(
     answer: str,
     message_id: int,
     original_message_text: Optional[str] = None,
+    username: Optional[str] = None,
 ):
     """Core logic to process a quiz answer, reusable by timeout and callback handlers."""
     async with track_quiz_answer_submission({"user_id": user_id}):
@@ -1061,10 +1075,12 @@ async def handle_quiz_answer_logic(
                 correct_answer = current_q.get("correct", "")
                 is_correct = correct_answer == answer
 
-            # Get user info
-            # In a timeout scenario, we don't have the full `update` object.
-            # We can fetch the username from the database if needed, but for now, we'll use the ID.
-            username = f"user_{user_id}"  # Fallback username
+            # Get user info - use provided username or fallback
+            if username:
+                user_display_name = username
+            else:
+                # Fallback username for timeouts or when username not available
+                user_display_name = f"user_{user_id}"
 
             # PERFORMANCE OPTIMIZATION: Use efficient exists() query instead of first()
             start_time = time.time()
@@ -1096,7 +1112,7 @@ async def handle_quiz_answer_logic(
             quiz_answer = QuizAnswer(
                 quiz_id=quiz_id,
                 user_id=user_id,
-                username=username,
+                username=user_display_name,
                 answer=answer,
                 question_index=question_index,  # Add question index for duplicate prevention
                 is_correct=str(
@@ -1271,7 +1287,9 @@ async def handle_reward_structure(update: Update, context: ContextTypes.DEFAULT_
 
         schedule = {i + 1: int(a) for i, a in enumerate(amounts)}
         total = sum(schedule.values())
-        deposit_addr = Config.DEPOSIT_ADDRESS  # Use DEPOSIT_ADDRESS instead of NEAR_WALLET_ADDRESS
+        deposit_addr = (
+            Config.DEPOSIT_ADDRESS
+        )  # Use DEPOSIT_ADDRESS instead of NEAR_WALLET_ADDRESS
 
         # Validate deposit address configuration
         if not deposit_addr:
@@ -1288,8 +1306,10 @@ async def handle_reward_structure(update: Update, context: ContextTypes.DEFAULT_
         quiz_id = None  # Initialize quiz_id
 
         # Get the quiz ID from Redis context (should be set during reward setup flow)
-        quiz_id = await redis_client.get_user_data_key(user_id, "current_quiz_id_for_reward_setup")
-        
+        quiz_id = await redis_client.get_user_data_key(
+            user_id, "current_quiz_id_for_reward_setup"
+        )
+
         session = SessionLocal()
         try:
             if quiz_id:
@@ -1482,8 +1502,8 @@ async def get_winners(update: Update, context: CallbackContext):
             )
             return
 
-        # Calculate winners for the quiz
-        winners = QuizAnswer.compute_quiz_winners(session, quiz.id)
+        # Calculate winners for the quiz using comprehensive participant ranking
+        winners = QuizAnswer.get_quiz_participants_ranking(session, quiz.id)
 
         if not winners:
             await safe_send_message(
@@ -1539,7 +1559,7 @@ async def get_winners(update: Update, context: CallbackContext):
                 session_update.query(Quiz).filter(Quiz.id == quiz.id).first()
             )
             if quiz_to_update:
-                quiz_to_update.winners_announced = "True"  # Set as string 'True'
+                quiz_to_update.winners_announced = True  # Set as Boolean True
                 if quiz_to_update.status == QuizStatus.ACTIVE:
                     quiz_to_update.status = QuizStatus.CLOSED
                 session_update.commit()
@@ -1679,7 +1699,13 @@ async def distribute_quiz_rewards(
             if success:
                 # Blockchain distribution was successful
                 if quiz.group_chat_id and bot_to_use:
-                    winners = QuizAnswer.compute_quiz_winners(session, quiz_id)
+                    all_participants = QuizAnswer.get_quiz_participants_ranking(
+                        session, quiz_id
+                    )
+                    # For winner announcements, only consider participants with correct answers
+                    winners = [
+                        p for p in all_participants if p.get("correct_count", 0) > 0
+                    ]
                     reward_schedule = quiz.reward_schedule or {}
                     reward_type = reward_schedule.get("type", "")
 

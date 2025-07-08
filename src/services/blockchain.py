@@ -33,9 +33,12 @@ class BlockchainMonitor:
     and handle deposits/withdrawals for quiz rewards.
     """
 
-    def __init__(self, bot):
-        """Initialize with access to the bot for sending notifications."""
+    def __init__(self, bot, application=None):
+        """Initialize with access to the bot for sending notifications and application for scheduling."""
         self.bot = bot
+        self.application = (
+            application  # Store application reference for JobQueue scheduling
+        )
         self._running = False
         self._monitor_task = None
         self.near_account: Optional[Account] = None
@@ -318,10 +321,32 @@ class BlockchainMonitor:
             # Get winners from database
             from models.quiz import QuizAnswer
 
-            winners = QuizAnswer.compute_quiz_winners(session, quiz_id)
-            logger.info(
-                f"[distribute_rewards] Found {len(winners)} winner entries: {winners}"
+            # Use the same participant ranking method as the leaderboard for consistency
+            all_participants = QuizAnswer.get_quiz_participants_ranking(
+                session, quiz_id
             )
+
+            # For reward distribution, you can choose one of these strategies:
+            # Option 1: Only participants with correct answers (current behavior)
+            winners = [p for p in all_participants if p.get("correct_count", 0) > 0]
+
+            logger.info(
+                f"[distribute_rewards] Found {len(all_participants)} total participants, {len(winners)} eligible for rewards"
+            )
+
+            if len(all_participants) > 0 and len(winners) == 0:
+                logger.info(
+                    f"[distribute_rewards] All {len(all_participants)} participants had 0 correct answers - no rewards distributed"
+                )
+            elif len(winners) == 0:
+                logger.info(
+                    f"[distribute_rewards] No participants found for quiz {quiz_id}"
+                )
+            else:
+                logger.info(
+                    f"[distribute_rewards] Distributing rewards to {len(winners)} participants with correct answers"
+                )
+                logger.debug(f"[distribute_rewards] Winner details: {winners}")
             if not winners:
                 logger.warning(f"No winners found for quiz {quiz_id}")
                 quiz.status = QuizStatus.CLOSED
@@ -672,12 +697,17 @@ class BlockchainMonitor:
         quiz_id: str,
         user_id: Optional[str] = None,
         expected_sender: Optional[str] = None,
+        send_announcement: bool = True,
     ) -> tuple[bool, str]:
         """
         Verify a transaction by its hash, checking that it was sent by the quiz creator.
 
         Args:
             tx_hash: The transaction hash to verify
+            quiz_id: The quiz ID being funded
+            user_id: The ID of the user making the payment (quiz creator)
+            expected_sender: Optional specific sender to verify (legacy parameter)
+            send_announcement: Whether to send the quiz activation announcement (default: True)
             quiz_id: The quiz ID being funded
             user_id: The ID of the user making the payment (quiz creator)
             expected_sender: Optional specific sender to verify (legacy parameter)
@@ -757,6 +787,8 @@ class BlockchainMonitor:
                 "topic": quiz.topic,
                 "group_chat_id": quiz.group_chat_id,
                 "created_at": quiz.created_at,
+                "questions": quiz.questions,
+                "duration_seconds": quiz.duration_seconds,
             }
 
             # Validate that deposit address is properly set
@@ -851,12 +883,12 @@ class BlockchainMonitor:
             # Calculate required amount including 2% fee
             # Use integer arithmetic to avoid floating point precision errors
             required_amount = quiz_data["required_amount"]
-            
+
             # Convert to yoctoNEAR first, then add 2% fee using integer arithmetic
             required_yocto_base = int(required_amount * NEAR)
             fee_yocto = required_yocto_base * 2 // 100  # 2% fee using integer division
             required_yocto_with_fee = required_yocto_base + fee_yocto
-            
+
             # For display purposes, convert back to NEAR
             required_amount_with_fee = required_yocto_with_fee / NEAR
 
@@ -865,7 +897,7 @@ class BlockchainMonitor:
             # precision errors that scale with the amount being calculated
             # Use 0.01% of the required amount or 100,000 yoctoNEAR, whichever is larger
             proportional_tolerance = max(int(required_yocto_with_fee * 0.0001), 100000)
-            
+
             logger.info(
                 f"Transaction amount verification: deposited={total_yocto} yoctoNEAR ({total_yocto / NEAR:.6f} NEAR), "
                 f"required={required_yocto_with_fee} yoctoNEAR ({required_yocto_with_fee / NEAR:.6f} NEAR), "
@@ -876,6 +908,7 @@ class BlockchainMonitor:
             if total_yocto >= (required_yocto_with_fee - proportional_tolerance):
                 # mark active and announce in new session with retry logic
                 from sqlalchemy.exc import IntegrityError
+                from datetime import datetime, timezone, timedelta
 
                 with get_db() as session:
                     quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
@@ -885,10 +918,24 @@ class BlockchainMonitor:
                             f"Quiz {quiz_id} is no longer in FUNDING state, aborting activation."
                         )
                         return False, msg
+
+                    # Set up quiz activation with proper timing
                     quiz.status = QuizStatus.ACTIVE
                     quiz.payment_transaction_hash = tx_hash
+                    quiz.activated_at = datetime.now(timezone.utc)
+
+                    # Calculate end time if duration is specified
+                    if quiz.duration_seconds and quiz.duration_seconds > 0:
+                        quiz.end_time = quiz.activated_at + timedelta(
+                            seconds=quiz.duration_seconds
+                        )
+                        logger.info(f"Quiz {quiz_id} end time set to: {quiz.end_time}")
+
                     try:
                         session.commit()
+                        logger.info(
+                            f"Quiz {quiz_id} activated successfully at {quiz.activated_at}"
+                        )
                     except IntegrityError as ie:
                         session.rollback()
                         msg = "This transaction hash has just been used by another quiz. Please use a different one."
@@ -897,16 +944,129 @@ class BlockchainMonitor:
                         )
                         return False, msg
 
-                # send announcement using stored quiz data
-                if quiz_data["group_chat_id"]:
+                # send announcement using stored quiz data (only if requested)
+                if send_announcement and quiz_data["group_chat_id"]:
+                    # Calculate number of questions
+                    num_questions = (
+                        len(quiz_data["questions"]) if quiz_data["questions"] else 0
+                    )
+
+                    # Format end time information
+                    end_time_text = "No specific end time set."
+                    if (
+                        quiz_data.get("duration_seconds")
+                        and quiz_data["duration_seconds"] > 0
+                    ):
+                        # Calculate end time from activation
+                        from datetime import datetime, timezone, timedelta
+
+                        activation_time = datetime.now(timezone.utc)
+                        end_time = activation_time + timedelta(
+                            seconds=quiz_data["duration_seconds"]
+                        )
+
+                        # Format duration for display
+                        duration_seconds = quiz_data["duration_seconds"]
+                        if duration_seconds >= 86400:  # 1 day or more
+                            days = duration_seconds // 86400
+                            remaining = duration_seconds % 86400
+                            hours = remaining // 3600
+                            if hours > 0:
+                                end_time_text = f"Ends in {days} day{'s' if days > 1 else ''} and {hours} hour{'s' if hours > 1 else ''}."
+                            else:
+                                end_time_text = (
+                                    f"Ends in {days} day{'s' if days > 1 else ''}."
+                                )
+                        elif duration_seconds >= 3600:  # 1 hour or more
+                            hours = duration_seconds // 3600
+                            remaining = duration_seconds % 3600
+                            minutes = remaining // 60
+                            if minutes > 0:
+                                end_time_text = f"Ends in {hours} hour{'s' if hours > 1 else ''} and {minutes} minute{'s' if minutes > 1 else ''}."
+                            else:
+                                end_time_text = (
+                                    f"Ends in {hours} hour{'s' if hours > 1 else ''}."
+                                )
+                        elif duration_seconds >= 60:  # 1 minute or more
+                            minutes = duration_seconds // 60
+                            end_time_text = (
+                                f"Ends in {minutes} minute{'s' if minutes > 1 else ''}."
+                            )
+                        else:
+                            end_time_text = f"Ends in {duration_seconds} second{'s' if duration_seconds > 1 else ''}."  # Schedule auto-distribution if we have an application with JobQueue
+                        if (
+                            self.application
+                            and hasattr(self.application, "job_queue")
+                            and self.application.job_queue
+                        ):
+                            try:
+                                # Import the scheduling function
+                                from services.quiz_service import (
+                                    schedule_auto_distribution,
+                                )
+
+                                # Schedule the auto-distribution
+                                self.application.create_task(
+                                    schedule_auto_distribution(
+                                        self.application, quiz_id, duration_seconds
+                                    )
+                                )
+                                logger.info(
+                                    f"Scheduled auto-distribution for quiz {quiz_id} in {duration_seconds} seconds"
+                                )
+                            except Exception as schedule_error:
+                                logger.error(
+                                    f"Failed to schedule auto-distribution for quiz {quiz_id}: {schedule_error}"
+                                )
+                        else:
+                            logger.warning(
+                                f"Application or JobQueue not available for scheduling auto-distribution for quiz {quiz_id}"
+                            )
+
                     await self.bot.send_message(
                         chat_id=quiz_data["group_chat_id"],
                         text=(
                             f"📣 New quiz '{quiz_data['topic']}' is now active! 🎯\n"
-                            f"Total rewards: {quiz_data['required_amount']} NEAR\n"
-                            f"Type /playquiz to participate!",
+                            f"{num_questions} Question{'s' if num_questions != 1 else ''}\n"
+                            f"Rewards: {quiz_data['required_amount']} NEAR\n"
+                            f"Ends: {end_time_text}\n"
+                            f"Type /playquiz to participate!"
                         ),
-                    )
+                    )  # Handle auto-distribution scheduling even if announcement is disabled
+                elif (
+                    not send_announcement
+                    and quiz_data.get("duration_seconds")
+                    and quiz_data["duration_seconds"] > 0
+                ):
+                    if (
+                        self.application
+                        and hasattr(self.application, "job_queue")
+                        and self.application.job_queue
+                    ):
+                        try:
+                            # Import the scheduling function
+                            from services.quiz_service import schedule_auto_distribution
+
+                            # Schedule the auto-distribution
+                            self.application.create_task(
+                                schedule_auto_distribution(
+                                    self.application,
+                                    quiz_id,
+                                    quiz_data["duration_seconds"],
+                                )
+                            )
+                            logger.info(
+                                f"Scheduled auto-distribution for quiz {quiz_id} in {quiz_data['duration_seconds']} seconds"
+                            )
+                        except Exception as schedule_error:
+                            logger.error(
+                                f"Failed to schedule auto-distribution for quiz {quiz_id}: {schedule_error}"
+                            )
+                    else:
+                        logger.warning(
+                            f"Application or JobQueue not available for scheduling auto-distribution for quiz {quiz_id}"
+                        )
+
                 return True, "Quiz activated successfully!"
             else:
                 shortage_yocto = required_yocto_with_fee - total_yocto
@@ -1103,10 +1263,12 @@ class BlockchainMonitor:
 
 
 # To be called during bot initialization
-async def start_blockchain_monitor(bot):
-    """Initialize and start the blockchain monitor with the bot instance."""
-    logger.info(f"[start_blockchain_monitor] creating BlockchainMonitor with bot={bot}")
-    monitor = BlockchainMonitor(bot)
+async def start_blockchain_monitor(bot, application=None):
+    """Initialize and start the blockchain monitor with the bot instance and application."""
+    logger.info(
+        f"[start_blockchain_monitor] creating BlockchainMonitor with bot={bot}, application={application}"
+    )
+    monitor = BlockchainMonitor(bot, application)
     await monitor.start_monitoring()
     logger.info(f"[start_blockchain_monitor] monitor started: {monitor}")
     return monitor

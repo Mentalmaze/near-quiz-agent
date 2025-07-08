@@ -7,6 +7,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     ContextTypes,
     ConversationHandler,
+    JobQueue,  # Add JobQueue import for auto-distribution scheduling
 )
 from telegram.ext import MessageHandler, filters
 from telegram.error import TimedOut, NetworkError, RetryAfter, TelegramError, BadRequest
@@ -31,6 +32,7 @@ class TelegramBot:
         webhook_url_path: str = None,
     ):
         # Build the Telegram application with increased connection timeout and retry settings
+        # CRITICAL FIX: Enable JobQueue for auto-distribution scheduling
         self.app = (
             ApplicationBuilder()
             .token(token)
@@ -41,6 +43,7 @@ class TelegramBot:
             .write_timeout(30.0)
             .pool_timeout(30.0)
             .connection_pool_size(8)  # Increase connection pool size
+            .job_queue(JobQueue())  # Enable JobQueue for scheduled tasks
             .build()
         )
         self.blockchain_monitor = None
@@ -59,7 +62,7 @@ class TelegramBot:
 
         try:
             if update:
-        
+
                 if isinstance(error, TimedOut):
                     logger.warning(f"Timeout error when processing update {update}")
                     # Prompt user to retry when a timeout occurs
@@ -253,7 +256,7 @@ class TelegramBot:
 
     async def init_blockchain(self):
         """Initialize the blockchain monitor."""
-        self.blockchain_monitor = await start_blockchain_monitor(self.app.bot)
+        self.blockchain_monitor = await start_blockchain_monitor(self.app.bot, self.app)
         self.app.blockchain_monitor = self.blockchain_monitor
         # Confirm monitor was attached correctly
         logger.info(

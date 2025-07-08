@@ -750,10 +750,10 @@ async def private_message_handler(update: Update, context: CallbackContext):
             )
             return
 
-        # Verify transaction on blockchain first
+        # Verify transaction on blockchain first (disable announcement since we send our own)
         verification_success, verification_message = (
             await blockchain_monitor.verify_transaction_by_hash(
-                payment_hash, quiz_id_awaiting_hash, user_id
+                payment_hash, quiz_id_awaiting_hash, user_id, send_announcement=False
             )
         )
 
@@ -846,28 +846,6 @@ async def private_message_handler(update: Update, context: CallbackContext):
                         await context.bot.send_message(
                             chat_id=quiz.group_chat_id, text=plain_announce_text
                         )
-                    finally:
-                        # Activate quiz and set end time when funded
-                        from models.quiz import QuizStatus
-                        from datetime import datetime, timedelta
-
-                        session2 = SessionLocal()
-                        try:
-                            q = (
-                                session2.query(Quiz)
-                                .filter(Quiz.id == quiz_id_awaiting_hash)
-                                .first()
-                            )
-                            if q:
-                                q.status = QuizStatus.ACTIVE
-                                q.activated_at = datetime.utcnow()
-                                if q.duration_seconds:
-                                    q.end_time = q.activated_at + timedelta(
-                                        seconds=q.duration_seconds
-                                    )
-                                session2.commit()
-                        finally:
-                            session2.close()
             except Exception as e:
                 logger.error(f"Error during quiz announcement: {e}", exc_info=True)
             finally:
