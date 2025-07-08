@@ -931,21 +931,35 @@ async def send_quiz_question(
     message_text_parts.append(f"\n{question_text}\n")
 
     keyboard = []
-    # ANTI-CHEAT: Shuffle only answer values, keep labels in order
+    # ANTI-CHEAT: Shuffle answer options while preserving correct answer tracking
     labels = sorted(options.keys())
-    values = list(options.values())
-    random.shuffle(values)
-    for label, value in zip(labels, values):
-        message_text_parts.append(f"{label}) {value}")
-        # Include question index and label in callback data
+    
+    # Create a list of (label, value) pairs and shuffle them together
+    label_value_pairs = list(options.items())
+    random.shuffle(label_value_pairs)
+    
+    # Create a mapping from original labels to shuffled labels
+    label_mapping = {}
+    for new_position, (original_label, value) in enumerate(label_value_pairs):
+        new_label = labels[new_position]  # A, B, C, D in order
+        label_mapping[original_label] = new_label
+        message_text_parts.append(f"{new_label}) {value}")
+        # Include question index and new label in callback data
         keyboard.append(
             [
                 InlineKeyboardButton(
-                    label,
-                    callback_data=f"quiz:{quiz.id}:{question_index}:{label}",
+                    new_label,
+                    callback_data=f"quiz:{quiz.id}:{question_index}:{new_label}",
                 )
             ]
         )
+    
+    # Store the label mapping in Redis for this user's question so we can use it during validation
+    redis_client = RedisClient()
+    await redis_client.set_user_quiz_data(
+        user_id, quiz.id, f"label_mapping_{question_index}", label_mapping
+    )
+    await redis_client.close()
 
     full_message_text = "\n".join(message_text_parts)
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1072,8 +1086,31 @@ async def handle_quiz_answer_logic(
                 is_correct = False
             else:
                 current_q = questions_list[question_index]
-                correct_answer = current_q.get("correct", "")
-                is_correct = correct_answer == answer
+                correct_answer_label = current_q.get("correct", "")
+                
+                # Get the label mapping for this user's question from Redis
+                redis_client = RedisClient()
+                label_mapping = await redis_client.get_user_quiz_data(
+                    user_id, quiz_id, f"label_mapping_{question_index}"
+                )
+                await redis_client.close()
+                
+                if label_mapping:
+                    # Find which shuffled label corresponds to the original correct answer
+                    correct_shuffled_label = label_mapping.get(correct_answer_label, "")
+                    is_correct = answer == correct_shuffled_label
+                    logger.debug(
+                        f"Answer validation: original_correct={correct_answer_label}, "
+                        f"shuffled_correct={correct_shuffled_label}, user_answer={answer}, "
+                        f"is_correct={is_correct}, mapping={label_mapping}"
+                    )
+                else:
+                    # Fallback to original logic if no mapping found (shouldn't happen)
+                    is_correct = answer == correct_answer_label
+                    logger.warning(
+                        f"No label mapping found for user {user_id}, quiz {quiz_id}, question {question_index}. "
+                        f"Using fallback logic: {answer} == {correct_answer_label} = {is_correct}"
+                    )
 
             # Get user info - use provided username or fallback
             if username:
@@ -1552,28 +1589,9 @@ async def get_winners(update: Update, context: CallbackContext):
             context.bot, update.effective_chat.id, message, parse_mode="Markdown"
         )
 
-        # Mark quiz as winners announced and potentially closed if it was active
-        session_update = SessionLocal()
-        try:
-            quiz_to_update = (
-                session_update.query(Quiz).filter(Quiz.id == quiz.id).first()
-            )
-            if quiz_to_update:
-                quiz_to_update.winners_announced = True  # Set as Boolean True
-                if quiz_to_update.status == QuizStatus.ACTIVE:
-                    quiz_to_update.status = QuizStatus.CLOSED
-                session_update.commit()
-                # Invalidate cache
-                redis_client = RedisClient()
-                await redis_client.delete_cached_object(f"quiz_details:{quiz.id}")
-                await redis_client.close()
-        except Exception as e_update:
-            logger.error(
-                f"Error updating quiz status after announcing winners for {quiz.id}: {e_update}"
-            )
-            session_update.rollback()
-        finally:
-            session_update.close()
+        # Note: We do NOT mark the quiz as closed or winners_announced here
+        # That should only happen when rewards are actually distributed
+        # This allows users to check leaderboards without affecting auto-distribution
 
     except Exception as e:
         await safe_send_message(
