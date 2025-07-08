@@ -617,17 +617,30 @@ class BlockchainMonitor:
                 raise
 
     async def verify_transaction_by_hash(
-        self, tx_hash: str, quiz_id: str, expected_sender: Optional[str] = None
-    ) -> bool:
-        """Verify a transaction by its hash, optionally checking the sender."""
+        self, tx_hash: str, quiz_id: str, sender_id: str
+    ) -> dict:
+        """
+        Verify a transaction by its hash, ensuring it comes from the expected sender.
+
+        Args:
+            tx_hash: The transaction hash to verify.
+            quiz_id: The ID of the quiz being funded.
+            sender_id: The expected sender's NEAR wallet address.
+
+        Returns:
+            A dictionary with 'success' (bool) and 'message' (str).
+        """
         # 1. Strict validation of hash format
-        if not re.match(r'^[1-9A-HJ-NP-Za-km-z]{43,45}$', tx_hash):
+        if not re.match(r"^[1-9A-HJ-NP-Za-km-z]{43,45}$", tx_hash):
             logger.warning(f"Invalid transaction hash format: {tx_hash}")
-            return False
+            return {"success": False, "message": "Invalid transaction hash format."}
 
         if not self.near_account:
             logger.error("Cannot verify transaction - NEAR account not initialized")
-            return False
+            return {
+                "success": False,
+                "message": "Internal error: Blockchain service not available.",
+            }
 
         # open session with retry logic
         quiz_data = {}
@@ -637,17 +650,23 @@ class BlockchainMonitor:
             quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
             if not quiz:
                 logger.warning(f"Verification failed: Quiz {quiz_id} not found.")
-                return False
+                return {
+                    "success": False,
+                    "message": f"Quiz with ID {quiz_id} could not be found.",
+                }
             if quiz.status != QuizStatus.FUNDING:
                 logger.warning(
                     f"Verification failed: Quiz {quiz_id} is not in FUNDING state (current: {quiz.status})."
                 )
-                return False
+                return {
+                    "success": False,
+                    "message": "This quiz is not currently awaiting funding.",
+                }
             # Store all required attributes while session is open
             quiz_data = {
                 "deposit_address": quiz.deposit_address,
                 "required_amount": (
-                    sum(int(v) for v in quiz.reward_schedule.values())
+                    sum(float(v) for v in quiz.reward_schedule.values())
                     if quiz.reward_schedule
                     else 0
                 ),
@@ -667,40 +686,57 @@ class BlockchainMonitor:
                 logger.warning(
                     f"Transaction hash {tx_hash} has already been used for quiz {existing_quiz.id}."
                 )
-                return False
+                return {
+                    "success": False,
+                    "message": "This transaction hash has already been used.",
+                }
 
         try:
-            # 2. Use the correct, robust RPC fetcher
-            result = await self._fetch_transaction_status_rpc(
-                tx_hash, quiz_data["deposit_address"]
-            )
+            # 2. Use the correct, robust RPC fetcher with the correct sender_id
+            result = await self._fetch_transaction_status_rpc(tx_hash, sender_id)
 
             if not result or "status" not in result:
                 logger.warning(f"RPC returned no result or status for tx {tx_hash}")
-                return False
+                return {
+                    "success": False,
+                    "message": "Transaction not found. Please double-check the hash and wait a moment for it to finalize on the blockchain.",
+                }
 
             status = result["status"]
             if isinstance(status, dict):
                 if "SuccessValue" not in status and "success_value" not in status:
-                    logger.warning(f"Transaction {tx_hash} was not successful. Status: {status}")
-                    return False
+                    logger.warning(
+                        f"Transaction {tx_hash} was not successful. Status: {status}"
+                    )
+                    return {
+                        "success": False,
+                        "message": "The transaction failed on the blockchain.",
+                    }
             elif isinstance(status, str) and "SuccessValue" not in status:
-                logger.warning(f"Transaction {tx_hash} was not successful. Status: {status}")
-                return False
+                logger.warning(
+                    f"Transaction {tx_hash} was not successful. Status: {status}"
+                )
+                return {
+                    "success": False,
+                    "message": "The transaction failed on the blockchain.",
+                }
 
             tx = result.get("transaction", {})
             if tx.get("receiver_id") != quiz_data["deposit_address"]:
                 logger.warning(
                     f"Transaction receiver ({tx.get('receiver_id')}) does not match deposit address ({quiz_data['deposit_address']})."
                 )
-                return False
+                return {
+                    "success": False,
+                    "message": "The transaction was sent to the wrong deposit address.",
+                }
 
             # 3. Enforce stricter transfer window: only accept transactions after quiz creation and within 15 minutes
             block_timestamp_ns = result.get("transaction_outcome", {}).get("block_hash")
             if not block_timestamp_ns:
-                 block_timestamp_ns = result.get("block_timestamp") or result.get(
-                "block_timestamp_nanosec"
-            )
+                block_timestamp_ns = result.get("block_timestamp") or result.get(
+                    "block_timestamp_nanosec"
+                )
 
             if block_timestamp_ns:
                 block_timestamp = datetime.utcfromtimestamp(
@@ -711,13 +747,18 @@ class BlockchainMonitor:
                     time_limit = timedelta(minutes=15)
                     # Only accept if transaction is after quiz creation and within 15 minutes
                     if not (
-                        quiz_created_at <= block_timestamp <= (quiz_created_at + time_limit)
+                        quiz_created_at
+                        <= block_timestamp
+                        <= (quiz_created_at + time_limit)
                     ):
                         logger.warning(
                             f"Transaction {tx_hash} is outside the allowed window. "
                             f"Block time: {block_timestamp}, Quiz created: {quiz_created_at}, Limit: {time_limit}"
                         )
-                        return False
+                        return {
+                            "success": False,
+                            "message": "This transaction is too old. It must be sent within 15 minutes of creating the quiz.",
+                        }
 
             actions = tx.get("actions", [])
             total_yocto = 0
@@ -734,8 +775,13 @@ class BlockchainMonitor:
                 with get_db() as session:
                     quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
                     if quiz.status != QuizStatus.FUNDING:
-                        logger.warning(f"Quiz {quiz_id} is no longer in FUNDING state, aborting activation.")
-                        return False
+                        logger.warning(
+                            f"Quiz {quiz_id} is no longer in FUNDING state, aborting activation."
+                        )
+                        return {
+                            "success": False,
+                            "message": "The quiz is no longer awaiting funding. Please try again.",
+                        }
                     quiz.status = QuizStatus.ACTIVE
                     quiz.payment_transaction_hash = tx_hash
                     session.commit()
@@ -750,15 +796,21 @@ class BlockchainMonitor:
                             f"Type /playquiz to participate!"
                         ),
                     )
-                return True
+                return {"success": True, "message": "Quiz activated successfully!"}
             else:
                 logger.warning(
                     f"Transaction amount {total_yocto / NEAR} NEAR is less than required {required_amount_with_fee} NEAR."
                 )
-                return False
+                return {
+                    "success": False,
+                    "message": f"The deposited amount is less than the required {required_amount_with_fee} NEAR.",
+                }
         except Exception as e:
             logger.error(f"Error verifying transaction {tx_hash}: {e}", exc_info=True)
-            return False
+            return {
+                "success": False,
+                "message": "An unexpected error occurred during verification.",
+            }
 
 
 # To be called during bot initialization

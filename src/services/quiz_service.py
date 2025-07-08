@@ -766,7 +766,9 @@ async def play_quiz(update: Update, context: CallbackContext):
         await redis_client.set_user_quiz_data(
             user_id, quiz_id_to_play, "question_order", question_indices
         )
-        await redis_client.set_user_quiz_data(user_id, quiz_id_to_play, "current_position", 0)
+        await redis_client.set_user_quiz_data(
+            user_id, quiz_id_to_play, "current_position", 0
+        )
         await redis_client.close()
 
         if not quiz_to_dm:
@@ -796,7 +798,14 @@ async def play_quiz(update: Update, context: CallbackContext):
 
         # Send the first question from the shuffled list
         first_question_shuffled_index = question_indices[0]
-        await send_quiz_question(context.bot, user_id, quiz_to_dm, first_question_shuffled_index, 0, len(questions))
+        await send_quiz_question(
+            context.bot,
+            user_id,
+            quiz_to_dm,
+            first_question_shuffled_index,
+            0,
+            len(questions),
+        )
 
     except Exception as e:
         logger.error(f"Error in play_quiz: {e}", exc_info=True)
@@ -810,7 +819,9 @@ async def play_quiz(update: Update, context: CallbackContext):
             session.close()
 
 
-async def send_quiz_question(bot, user_id, quiz, question_index, current_num, total_questions):
+async def send_quiz_question(
+    bot, user_id, quiz, question_index, current_num, total_questions
+):
     """Send a specific question from the quiz to the user."""
 
     # Get the questions list
@@ -1043,7 +1054,12 @@ async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
                 next_question_task = asyncio.create_task(
                     send_quiz_question(
-                        context.bot, query.message.chat_id, quiz, next_question_index, next_position, len(question_order)
+                        context.bot,
+                        query.message.chat_id,
+                        quiz,
+                        next_question_index,
+                        next_position,
+                        len(question_order),
                     )
                 )
             else:
@@ -1053,7 +1069,7 @@ async def handle_quiz_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     query.message.chat_id,
                     f"You've tackled all {len(question_order)} questions in the '{quiz.topic}' quiz! Your answers are saved. Eager to see the results? Use `/winners {quiz.id}`.",
                 )
-                next_question_task = asyncio.create_task(asyncio.sleep(0)) # No-op task
+                next_question_task = asyncio.create_task(asyncio.sleep(0))  # No-op task
 
             # Run database and cache operations concurrently
             db_cache_tasks = [
@@ -1239,6 +1255,21 @@ async def handle_transaction_hash(update: Update, context: CallbackContext):
             await redis_client.delete_user_data_key(user_id, "awaiting")
             return
 
+        # Fetch the user's linked wallet address to use as the sender_id
+        session = SessionLocal()
+        try:
+            user = session.query(User).filter(User.id == user_id).first()
+            if not user or not user.wallet_address:
+                await safe_send_message(
+                    context.bot,
+                    update.effective_chat.id,
+                    "You do not have a wallet linked. Please link your wallet first using /linkwallet and then send the transaction hash again.",
+                )
+                return
+            sender_wallet = user.wallet_address
+        finally:
+            session.close()
+
         await context.bot.send_chat_action(
             chat_id=update.effective_chat.id, action="typing"
         )
@@ -1258,44 +1289,29 @@ async def handle_transaction_hash(update: Update, context: CallbackContext):
             await redis_client.delete_user_data_key(user_id, "awaiting")
             return
 
-        success = await blockchain_monitor.verify_transaction_by_hash(tx_hash, quiz_id)
+        # Pass the required sender_wallet to the verification function
+        verification_result = await blockchain_monitor.verify_transaction_by_hash(
+            tx_hash, quiz_id, sender_wallet
+        )
 
-        if success:
+        if verification_result["success"]:
             await safe_send_message(
                 context.bot,
                 update.effective_chat.id,
-                "✅ Transaction verified successfully! Your quiz is now active and ready to play.",
+                f"✅ {verification_result['message']}",
             )
-            session = SessionLocal()
-            try:
-                quiz = session.query(Quiz).filter(Quiz.id == quiz_id).first()
-                if quiz and quiz.group_chat_id:
-                    total_reward = (
-                        sum(int(v) for v in quiz.reward_schedule.values())
-                        if quiz.reward_schedule
-                        else 0
-                    )
-                    await safe_send_message(
-                        context.bot,
-                        quiz.group_chat_id,
-                        f"📣 New quiz '{quiz.topic}' is now active! 🎯\n"
-                        f"Total rewards: {total_reward} NEAR\n"
-                        "Type /playquiz to participate!",
-                    )
-            finally:
-                session.close()
+            # Clear the user's state since the process is complete
+            await redis_client.delete_user_data_key(user_id, "awaiting")
+            await redis_client.delete_user_data_key(user_id, "quiz_id")
         else:
+            # Provide the specific error message from the verification function
             await safe_send_message(
                 context.bot,
                 update.effective_chat.id,
-                "❌ Couldn't verify your transaction. Please ensure:\n"
-                "1. The transaction hash is correct\n"
-                "2. The transaction was sent to the correct address\n"
-                "3. The transaction amount is sufficient for the rewards\n\n"
-                "Alternatively, wait for automatic verification (may take a few minutes).",
+                f"❌ Verification failed: {verification_result['message']}",
             )
+            # We don't clear the 'awaiting' state here, so the user can try again with a new hash.
 
-        await redis_client.delete_user_data_key(user_id, "awaiting")
     finally:
         await redis_client.close()
 
