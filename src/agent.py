@@ -8,6 +8,18 @@ import getpass
 import time
 import re
 
+# Performance monitoring import
+try:
+    from utils.performance_monitor import track_ai_generation
+except ImportError:
+    # Fallback for when performance monitor is not available
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def track_ai_generation(metadata=None):
+        yield
+
+
 # Load environment variables from .env file
 load_dotenv(find_dotenv())
 
@@ -23,22 +35,29 @@ async def generate_quiz(
     """
     Generate a multiple-choice quiz about a topic.
     """
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-2.0-flash", api_key=GOOGLE_API_KEY, temperature=0.75
-    )  # Added temperature
+    async with track_ai_generation(
+        {
+            "topic": topic,
+            "num_questions": num_questions,
+            "has_context": bool(context_text),
+        }
+    ):
+        llm = ChatGoogleGenerativeAI(
+            model="gemini-2.0-flash", api_key=GOOGLE_API_KEY, temperature=0.75
+        )  # Added temperature
 
-    # Preprocess context
-    if context_text:
-        context_text = preprocess_text(context_text)
+        # Preprocess context
+        if context_text:
+            context_text = preprocess_text(context_text)
 
-    # Unified, meta-prompt with few-shot and robust instructions
-    BASIC_SYSTEM = """
+        # Unified, meta-prompt with few-shot and robust instructions
+        BASIC_SYSTEM = """
 You are QuizMasterGPT, an expert educator and fact-checker.
 Your primary goal is to produce unique, non-repetitive, evidence-based multiple-choice questions.
 Each question should explore a different facet or sub-topic of the main theme.
 """
 
-    FEW_SHOT = """
+        FEW_SHOT = """
 Example 1 (Definition):
 Question: What is the primary consensus mechanism used by the Bitcoin network?
 A) Proof of Stake
@@ -64,7 +83,7 @@ D) SNL
 Correct Answer: A
 """
 
-    TEMPLATE = """
+        TEMPLATE = """
 {few_shot}
 
 Now, generate {num_questions} distinct multiple-choice question(s) exclusively about **{topic}**.
@@ -93,38 +112,68 @@ Strict requirements:
 Format each question exactly like the examples provided (Question, Options A-D, Correct Answer).
 """
 
-    prompt = ChatPromptTemplate.from_template(
-        BASIC_SYSTEM + "\n" + TEMPLATE  # FEW_SHOT is now part of the main TEMPLATE
-    )
+        prompt = ChatPromptTemplate.from_template(
+            BASIC_SYSTEM + "\n" + TEMPLATE  # FEW_SHOT is now part of the main TEMPLATE
+        )
 
-    messages = prompt.format_messages(
-        few_shot=FEW_SHOT,  # Pass it here so it's correctly inserted into the TEMPLATE
-        topic=topic,
-        num_questions=num_questions,
-        context=context_text
-        or "No additional context provided. Rely on general knowledge for the topic.",
-    )
+        messages = prompt.format_messages(
+            few_shot=FEW_SHOT,  # Pass it here so it's correctly inserted into the TEMPLATE
+            topic=topic,
+            num_questions=num_questions,
+            context=context_text
+            or "No additional context provided. Rely on general knowledge for the topic.",
+        )
 
-    # Remaining generation & retry logic unchanged...
-    max_attempts = 3
-    attempt = 0
-    last_exception = None
+        # Enhanced generation & retry logic with better error handling
+        max_attempts = 3
+        attempt = 0
+        last_exception = None
 
-    while attempt < max_attempts:
-        try:
-            timeout = 15.0 * (
-                1
-                + 0.5 * min(num_questions, 10)
-                + 0.01 * min(len(context_text or ""), 1000)
-            )
-            response = await asyncio.wait_for(llm.ainvoke(messages), timeout=timeout)
-            return response.content
+        while attempt < max_attempts:
+            try:
+                # Dynamic timeout based on complexity
+                base_timeout = 15.0
+                question_factor = 0.5 * min(num_questions, 10)
+                context_factor = 0.01 * min(len(context_text or ""), 1000)
+                timeout = base_timeout * (1 + question_factor + context_factor)
 
-        except Exception:
-            attempt += 1
-            await asyncio.sleep(1)
+                # Cap maximum timeout at 60 seconds
+                timeout = min(timeout, 60.0)
 
-    return generate_fallback_quiz(topic, num_questions)
+                print(
+                    f"[AI] Generating quiz (attempt {attempt + 1}/{max_attempts}, timeout: {timeout:.1f}s)"
+                )
+
+                response = await asyncio.wait_for(
+                    llm.ainvoke(messages), timeout=timeout
+                )
+
+                # Validate response content
+                if not response.content or len(response.content.strip()) < 50:
+                    raise ValueError("Generated content too short or empty")
+
+                return response.content
+
+            except asyncio.TimeoutError as e:
+                last_exception = e
+                print(f"[AI] Attempt {attempt + 1} timed out after {timeout:.1f}s")
+                attempt += 1
+                if attempt < max_attempts:
+                    wait_time = 2**attempt  # Exponential backoff
+                    print(f"[AI] Waiting {wait_time}s before retry...")
+                    await asyncio.sleep(wait_time)
+
+            except Exception as e:
+                last_exception = e
+                print(f"[AI] Attempt {attempt + 1} failed: {str(e)[:100]}...")
+                attempt += 1
+                if attempt < max_attempts:
+                    await asyncio.sleep(1)
+
+        print(
+            f"[AI] All attempts failed, using fallback quiz. Last error: {last_exception}"
+        )
+        return generate_fallback_quiz(topic, num_questions)
 
 
 def generate_fallback_quiz(topic, num_questions=1):
@@ -143,30 +192,61 @@ Correct Answer: A"""
     return "\n\n".join(questions)
 
 
-async def generate_tweet(topic):
-    """
-    Generate a concise, engaging tweet about the given topic (max 280 characters).
-    """
-    # Initialize the chat model
-    llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", api_key=GOOGLE_API_KEY)
+# async def generate_tweet(topic):
+#     """
+#     Generate a concise, engaging tweet about the given topic (max 280 characters).
+#     """
+#     async with track_ai_generation({"topic": topic, "type": "tweet"}):
+#         # Initialize the chat model
+#         llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", api_key=GOOGLE_API_KEY)
 
-    # Prompt template for a tweet
-    tweet_template = (
-        "Write a concise, engaging tweet about {topic}. "
-        "Keep it under 280 characters and include a friendly tone."
-    )
-    prompt = ChatPromptTemplate.from_template(tweet_template)
+#         # Prompt template for a tweet
+#         tweet_template = (
+#             "Write a concise, engaging tweet about {topic}. "
+#             "Keep it under 280 characters and include a friendly tone."
+#         )
+#         prompt = ChatPromptTemplate.from_template(tweet_template)
 
-    # Generate the tweet with timeout
-    messages = prompt.format_messages(topic=topic)
+#         # Generate the tweet with enhanced timeout and retry logic
+#         messages = prompt.format_messages(topic=topic)
 
-    try:
-        response = await asyncio.wait_for(llm.ainvoke(messages), timeout=5.0)
-        return response.content
-    except asyncio.TimeoutError:
-        return "Sorry, tweet generation took too long. Please try a simpler topic."
-    except Exception as e:
-        return f"An error occurred: {str(e)}"
+#         max_attempts = 2
+#         for attempt in range(max_attempts):
+#             try:
+#                 timeout = 8.0 if attempt == 0 else 12.0  # Longer timeout on retry
+#                 print(f"[AI] Generating tweet (attempt {attempt + 1}/{max_attempts})")
+
+#                 response = await asyncio.wait_for(
+#                     llm.ainvoke(messages), timeout=timeout
+#                 )
+
+#                 # Validate tweet length
+#                 if len(response.content) > 280:
+#                     print(
+#                         f"[AI] Tweet too long ({len(response.content)} chars), retrying..."
+#                     )
+#                     if attempt < max_attempts - 1:
+#                         continue
+#                     # Truncate if last attempt
+#                     return response.content[:277] + "..."
+
+#                 return response.content
+
+#             except asyncio.TimeoutError:
+#                 print(f"[AI] Tweet generation timed out (attempt {attempt + 1})")
+#                 if attempt == max_attempts - 1:
+#                     return (
+#                         f"Check out this interesting topic: {topic} #blockchain #quiz"
+#                     )
+#                 await asyncio.sleep(1)
+
+#             except Exception as e:
+#                 print(f"[AI] Tweet generation error: {str(e)[:50]}...")
+#                 if attempt == max_attempts - 1:
+#                     return f"Exploring {topic} today! #learning #quiz"
+#                 await asyncio.sleep(1)
+
+#         return f"Discover more about {topic}! 🧠 #mentalmazequiz"
 
 
 def preprocess_text(text):

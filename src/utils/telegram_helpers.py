@@ -15,8 +15,8 @@ logger = logging.getLogger(__name__)
 
 
 def with_telegram_retry(
-    max_retries: int = 3,
-    retry_delay: float = 1.0,
+    max_retries: int = 2,  # Reduced from 3 for faster failures
+    retry_delay: float = 0.5,  # Reduced from 1.0 for faster retries
     exceptions_to_retry=(TimedOut, NetworkError, RetryAfter),
 ) -> Callable:
     """
@@ -135,7 +135,7 @@ def sanitize_markdown(text: str) -> str:
     return text
 
 
-async def safe_send_message(bot, chat_id, text, **kwargs):
+async def safe_send_message(bot, chat_id, text, timeout=10.0, **kwargs):
     """
     Safely send a message with proper error handling.
 
@@ -154,8 +154,12 @@ async def safe_send_message(bot, chat_id, text, **kwargs):
         text = sanitize_markdown(text)
 
     try:
-        return await with_telegram_retry()(bot.send_message)(
-            chat_id=chat_id, text=text, **kwargs
+        # Add timeout to prevent hanging
+        return await asyncio.wait_for(
+            with_telegram_retry()(bot.send_message)(
+                chat_id=chat_id, text=text, **kwargs
+            ),
+            timeout=timeout,
         )
     except BadRequest as e:
         if "can't parse entities" in str(e).lower():
@@ -163,8 +167,11 @@ async def safe_send_message(bot, chat_id, text, **kwargs):
             # Try sending without any parsing mode
             kwargs.pop("parse_mode", None)
             try:
-                return await with_telegram_retry()(bot.send_message)(
-                    chat_id=chat_id, text=text, **kwargs
+                return await asyncio.wait_for(
+                    with_telegram_retry()(bot.send_message)(
+                        chat_id=chat_id, text=text, **kwargs
+                    ),
+                    timeout=timeout,
                 )
             except BadRequest as e2:
                 logger.error(f"Failed to send message even without formatting: {e2}")
@@ -179,7 +186,9 @@ async def safe_send_message(bot, chat_id, text, **kwargs):
         return None
 
 
-async def safe_edit_message_text(bot, chat_id, message_id, text, **kwargs):
+async def safe_edit_message_text(
+    bot, chat_id, message_id, text, timeout=10.0, **kwargs
+):
     """
     Safely edit a message with proper error handling.
 
@@ -194,8 +203,11 @@ async def safe_edit_message_text(bot, chat_id, message_id, text, **kwargs):
         The edited Message object or None if failed
     """
     try:
-        return await with_telegram_retry()(bot.edit_message_text)(
-            chat_id=chat_id, message_id=message_id, text=text, **kwargs
+        return await asyncio.wait_for(
+            with_telegram_retry()(bot.edit_message_text)(
+                chat_id=chat_id, message_id=message_id, text=text, **kwargs
+            ),
+            timeout=timeout,
         )
     except BadRequest as e:
         if "message is not modified" in str(e).lower():

@@ -24,9 +24,7 @@ class Config:
     GOOGLE_API_KEY = os.getenv("GOOGLE_GEMINI_API_KEY")
 
     # NEAR Blockchain Configuration
-    NEAR_RPC_ENDPOINT = os.getenv(
-        "NEAR_RPC_ENDPOINT", "https://free.rpc.fastnear.com"
-    )
+    NEAR_RPC_ENDPOINT = os.getenv("NEAR_RPC_ENDPOINT", "https://free.rpc.fastnear.com")
     NEAR_WALLET_PRIVATE_KEY = os.getenv("NEAR_WALLET_PRIVATE_KEY")
     NEAR_WALLET_ADDRESS = os.getenv("NEAR_WALLET_ADDRESS")
     NEAR_RPC_ENDPOINT_TRANS = os.getenv(
@@ -49,6 +47,21 @@ class Config:
     # Quiz Configuration
     DEFAULT_QUIZ_QUESTIONS = 1
     MAX_QUIZ_QUESTIONS = 5
+    QUESTION_TIMER_SECONDS = 60  # Time limit for each question
+
+    # Reward Distribution Strategy
+    # "correct_answers_only" - Only participants with at least one correct answer get rewards
+    # "all_participants" - All participants get rewards regardless of correctness
+    REWARD_DISTRIBUTION_STRATEGY = os.getenv(
+        "REWARD_DISTRIBUTION_STRATEGY", "correct_answers_only"
+    )
+
+    # Redis Configuration
+    REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+    REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+    REDIS_SSL = os.getenv("REDIS_SSL", True)
+    # REDIS_DB = int(os.getenv("REDIS_DB", 0))
+    REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", None)
 
     # Production check helper
     @classmethod

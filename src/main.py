@@ -15,6 +15,7 @@ logging.basicConfig(
 from utils.config import Config
 from bot.telegram_bot import TelegramBot
 from store.database import init_db, migrate_schema
+from utils.redis_client import RedisClient  # Added import
 
 logger = logging.getLogger(__name__)
 
@@ -29,23 +30,34 @@ async def main():
     # # Try to migrate schema if using PostgreSQL
     # if "postgresql" in Config.DATABASE_URL or "postgres" in Config.DATABASE_URL:
     #     logger.info("Attempting to migrate database schema for PostgreSQL...")
-    #     migrate_schema()
+    # migrate_schema()
 
     # Initialize database tables if they don't exist
-    init_db()
+    # init_db()
+
+    # Try to connect to Redis
+    try:
+        redis_instance = await RedisClient.get_instance()
+        if redis_instance:
+            logger.info("Successfully connected to Redis and pinged the server.")
+        else:
+            logger.error(
+                "Failed to get Redis instance, but no exception was raised. Check RedisClient logic."
+            )
+
+    except Exception as e:
+        logger.error(
+            f"Failed to connect to Redis: {e}. The application will continue without Redis.",
+            exc_info=True,
+        )
 
     # Start telegram bot
     # Check if WEBHOOK_URL is defined and not empty in Config
     if hasattr(Config, "WEBHOOK_URL") and Config.WEBHOOK_URL:
-        # Provide sensible defaults if specific webhook config values are missing
         webhook_listen_ip = getattr(Config, "WEBHOOK_LISTEN_IP", "0.0.0.0")
-        webhook_port = int(
-            getattr(Config, "WEBHOOK_PORT", 8443)
-        )  # Ensure port is an int
+        webhook_port = int(getattr(Config, "WEBHOOK_PORT", 8443))
         # Use TELEGRAM_TOKEN as default webhook path if WEBHOOK_URL_PATH is not set or is empty
-        config_url_path = getattr(
-            Config, "WEBHOOK_URL_PATH", None
-        )  # Get value from Config, could be None
+        config_url_path = getattr(Config, "WEBHOOK_URL_PATH", None)
         webhook_url_path = config_url_path if config_url_path else Config.TELEGRAM_TOKEN
         # Get certificate and key paths for SSL
         certificate_path = getattr(Config, "SSL_CERT_PATH", None)
@@ -61,25 +73,23 @@ async def main():
         )
 
         bot_instance = TelegramBot(
-            token=Config.TELEGRAM_TOKEN,
+            token=Config.TELEGRAM_TOKEN,  # type: ignore
             webhook_url=Config.WEBHOOK_URL,  # Full base URL for the webhook (e.g., https://your.domain.com)
             webhook_listen_ip=webhook_listen_ip,  # IP address to listen on (e.g., 0.0.0.0)
             webhook_port=webhook_port,  # Port to listen on (e.g., 8443)
-            webhook_url_path=webhook_url_path,  # Path for the webhook (e.g., /your-bot-token)
+            webhook_url_path=webhook_url_path,  # Path for the webhook (e.g., /your-bot-token) # type: ignore
         )
     else:
         logger.info(
             "Initializing bot with polling (WEBHOOK_URL not configured or empty)."
         )
-        bot_instance = TelegramBot(token=Config.TELEGRAM_TOKEN)
+        bot_instance = TelegramBot(token=Config.TELEGRAM_TOKEN)  # type: ignore
 
     bot_instance.register_handlers()
     await bot_instance.start()  # This method in TelegramBot should handle either polling or webhook start
 
 
 if __name__ == "__main__":
-    # To quickly force polling mode for testing, uncomment next line:
-    # Config.WEBHOOK_URL = None
 
     loop = asyncio.get_event_loop()
     main_task = None  # To hold the main task
@@ -100,12 +110,22 @@ if __name__ == "__main__":
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
 
-                # If main_task was cancelled or errored, it might affect bot_instance.stop()
-                # if it relies on the same loop/context that just failed.
-                # Running stop in a new context if needed or ensuring it's robust.
                 loop.run_until_complete(bot_instance.stop())
             except Exception as e_stop:
                 logger.error(f"Error during bot stop: {e_stop}", exc_info=True)
+
+        # Close Redis connection
+        logger.info("Attempting to gracefully close Redis connection...")
+        try:
+            # Ensure loop is available for RedisClient.close()
+            if loop.is_closed():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            loop.run_until_complete(RedisClient.close())
+        except Exception as e_redis_close:
+            logger.error(
+                f"Error closing Redis connection: {e_redis_close}", exc_info=True
+            )
 
         # Cancel the main task if it's still pending (e.g., KeyboardInterrupt)
         if main_task and not main_task.done():
@@ -116,12 +136,6 @@ if __name__ == "__main__":
                 logger.info("Main task cancelled.")
             except Exception as e_cancel:  # Log other errors during cancellation
                 logger.error(f"Error cancelling main task: {e_cancel}", exc_info=True)
-
-        # Close the loop only if we are sure it's not needed by other components
-        # If using webhooks with some libraries, they might manage their own loop or expect it to remain.
-        # For now, let's assume we can close it if we started it for stop().
-        # if not loop.is_running() and loop is not asyncio.get_event_loop(): # Avoid closing global loop if we didn't own it
-        #    loop.close()
 
         logger.info("Bot shutdown process complete.")
 

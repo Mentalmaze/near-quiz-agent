@@ -49,16 +49,28 @@ def create_db_engine():
 
         logger.info("Attempting database connection...")
 
-        # Enhanced connection pool settings for PostgreSQL
+        # PERFORMANCE OPTIMIZATION: Enhanced connection pool settings for PostgreSQL
         engine_args = {}
         if "postgresql" in database_url:
             engine_args.update(
                 {
-                    "pool_size": 5,
-                    "max_overflow": 10,
+                    "pool_size": 10,  # Increased from 5 for better concurrency
+                    "max_overflow": 20,  # Increased from 10 for handling spikes
                     "pool_timeout": 30,
                     "pool_recycle": 1800,  # Recycle connections after 30 minutes
                     "pool_pre_ping": True,  # Enable connection health checks
+                    "pool_reset_on_return": "commit",  # Reset connections on return
+                    "isolation_level": "READ_COMMITTED",  # Optimize for concurrent reads
+                }
+            )
+        else:
+            # SQLite optimizations for development
+            engine_args.update(
+                {
+                    "pool_size": 5,
+                    "max_overflow": 0,  # SQLite doesn't benefit from overflow
+                    "pool_timeout": 10,
+                    "pool_pre_ping": True,
                 }
             )
 

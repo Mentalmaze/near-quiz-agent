@@ -7,6 +7,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     ContextTypes,
     ConversationHandler,
+    JobQueue,  # Add JobQueue import for auto-distribution scheduling
 )
 from telegram.ext import MessageHandler, filters
 from telegram.error import TimedOut, NetworkError, RetryAfter, TelegramError, BadRequest
@@ -31,6 +32,7 @@ class TelegramBot:
         webhook_url_path: str = None,
     ):
         # Build the Telegram application with increased connection timeout and retry settings
+        # CRITICAL FIX: Enable JobQueue for auto-distribution scheduling
         self.app = (
             ApplicationBuilder()
             .token(token)
@@ -41,6 +43,7 @@ class TelegramBot:
             .write_timeout(30.0)
             .pool_timeout(30.0)
             .connection_pool_size(8)  # Increase connection pool size
+            .job_queue(JobQueue())  # Enable JobQueue for scheduled tasks
             .build()
         )
         self.blockchain_monitor = None
@@ -59,9 +62,18 @@ class TelegramBot:
 
         try:
             if update:
-                # If we have an update object, we can respond to the user
+
                 if isinstance(error, TimedOut):
                     logger.warning(f"Timeout error when processing update {update}")
+                    # Prompt user to retry when a timeout occurs
+                    try:
+                        if isinstance(update, Update) and update.effective_chat:
+                            await context.bot.send_message(
+                                chat_id=update.effective_chat.id,
+                                text="⏱️ Sorry, that operation took too long. Please reenter the last text again.",
+                            )
+                    except Exception as e:
+                        logger.error(f"Failed to notify user of timeout: {e}")
                     # Don't try to respond on timeout errors, it might cause another timeout
                     return
 
@@ -117,6 +129,7 @@ class TelegramBot:
             distribute_rewards_handler,
             start_reward_setup_callback,  # Import new reward setup handlers
             handle_reward_method_choice,
+            show_all_active_leaderboards_command,
         )
 
         # Conversation for interactive quiz creation needs to be registered FIRST
@@ -208,6 +221,10 @@ class TelegramBot:
         )  # Register the new handler
         self.app.add_handler(CommandHandler("playquiz", play_quiz_handler))
         self.app.add_handler(CommandHandler("winners", winners_handler))
+        self.app.add_handler(
+            CommandHandler("leaderboards", show_all_active_leaderboards_command)
+        )
+
         # self.app.add_handler(
         #     CommandHandler("distributerewards", distribute_rewards_handler)
         # )
@@ -239,7 +256,7 @@ class TelegramBot:
 
     async def init_blockchain(self):
         """Initialize the blockchain monitor."""
-        self.blockchain_monitor = await start_blockchain_monitor(self.app.bot)
+        self.blockchain_monitor = await start_blockchain_monitor(self.app.bot, self.app)
         self.app.blockchain_monitor = self.blockchain_monitor
         # Confirm monitor was attached correctly
         logger.info(
